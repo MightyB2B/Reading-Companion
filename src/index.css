@@ -1,0 +1,371 @@
+@import "tailwindcss";
+
+/* Themes are six variables. Every surface in the app is built from them, so a
+   theme is a palette rather than a stylesheet, and adding one costs six lines.
+
+   `paper` is the reading surface, `ink` the text on it, `rule` the hairlines,
+   `accent` the one colour that carries meaning. The defaults below are the
+   light theme; `data-theme` on <html> overrides them. */
+@theme {
+  --color-paper: #faf7f2;
+  --color-paper-dim: #f3efe7;
+  --color-ink: #1f1d1a;
+  --color-ink-soft: #57514a;
+  --color-rule: #e2dbcf;
+  --color-accent: #7c5c3e;
+
+  --font-serif: "Georgia", "Iowan Old Style", "Palatino Linotype", serif;
+}
+
+/* "System" follows the OS, but only while no explicit theme is chosen. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --color-paper: #171614;
+    --color-paper-dim: #1f1e1b;
+    --color-ink: #ece7df;
+    --color-ink-soft: #a29a8f;
+    --color-rule: #332f2a;
+    --color-accent: #c99b6b;
+  }
+}
+
+:root[data-theme="light"] {
+  --color-paper: #faf7f2;
+  --color-paper-dim: #f3efe7;
+  --color-ink: #1f1d1a;
+  --color-ink-soft: #57514a;
+  --color-rule: #e2dbcf;
+  --color-accent: #7c5c3e;
+}
+
+:root[data-theme="dark"] {
+  --color-paper: #171614;
+  --color-paper-dim: #1f1e1b;
+  --color-ink: #ece7df;
+  --color-ink-soft: #a29a8f;
+  --color-rule: #332f2a;
+  --color-accent: #c99b6b;
+}
+
+/* Aged paper. Warmer and lower-contrast than the light theme — easier on the
+   eyes over a long session, and closer to the books this app is used with. */
+:root[data-theme="sepia"] {
+  --color-paper: #f4ecd8;
+  --color-paper-dim: #eae0c8;
+  --color-ink: #3a2f21;
+  --color-ink-soft: #6b5b45;
+  --color-rule: #d8caa9;
+  --color-accent: #8a5a2b;
+}
+
+/* For reading at night without a lit room. Deep blue rather than black:
+   pure black against pale text produces halation for many readers. */
+:root[data-theme="night"] {
+  --color-paper: #0f141c;
+  --color-paper-dim: #161d27;
+  --color-ink: #c6cedb;
+  --color-ink-soft: #7d8798;
+  --color-rule: #263140;
+  --color-accent: #7aa2d6;
+}
+
+/* Maximum contrast, no warmth. For bright rooms and tired eyes. */
+:root[data-theme="high-contrast"] {
+  --color-paper: #ffffff;
+  --color-paper-dim: #f0f0f0;
+  --color-ink: #000000;
+  --color-ink-soft: #333333;
+  --color-rule: #999999;
+  --color-accent: #0043a8;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* The reading pane itself is serif; the working chrome around it is not. */
+.prose-page {
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+  line-height: 1.75;
+}
+
+/* ---- scrollbars ---------------------------------------------------------
+   The default Windows scrollbar is a wide grey slab against a cream page —
+   the loudest thing on screen in an app whose whole job is quiet reading.
+   This makes it a thin rule that only asserts itself on hover. */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--color-ink) 20%, transparent) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  /* Drawn inside a transparent border so the visible bar is ~5px while the
+     grab target stays a comfortable 11px. */
+  background-color: color-mix(in oklab, var(--color-ink) 18%, transparent);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklab, var(--color-ink) 34%, transparent);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ---- page turn ----------------------------------------------------------
+   A leaf hinged at the spine: the free edge lifts, sweeps across, and the
+   next page is revealed beneath it.
+
+   turn.js does this more elaborately, but it wants jQuery, a non-commercial
+   licence, and every page present as a fixed-size sibling div. This pane is a
+   scrollable variable-height column that loads one page at a time from SQLite,
+   so the geometry it assumes does not hold. The effect below is the part worth
+   having.
+
+   The perspective lives on the stage, not the leaf, so the vanishing point
+   stays put while the leaf rotates — putting it on the element itself is what
+   makes a CSS page turn look like a flat swinging door. */
+
+.page-stage {
+  perspective: 2200px;
+  perspective-origin: left center;
+}
+
+/* Forward: hinged at the spine on the left, the right edge lifts away. */
+@keyframes leaf-away-forward {
+  from {
+    transform: rotateY(0deg);
+    opacity: 1;
+  }
+  to {
+    transform: rotateY(-82deg);
+    opacity: 0;
+  }
+}
+
+@keyframes leaf-settle-forward {
+  from {
+    transform: rotateY(24deg);
+    opacity: 0;
+  }
+  to {
+    transform: rotateY(0deg);
+    opacity: 1;
+  }
+}
+
+/* Back: mirrored, hinged on the right. */
+@keyframes leaf-away-back {
+  from {
+    transform: rotateY(0deg);
+    opacity: 1;
+  }
+  to {
+    transform: rotateY(82deg);
+    opacity: 0;
+  }
+}
+
+@keyframes leaf-settle-back {
+  from {
+    transform: rotateY(-24deg);
+    opacity: 0;
+  }
+  to {
+    transform: rotateY(0deg);
+    opacity: 1;
+  }
+}
+
+.leaf-away-forward {
+  animation: leaf-away-forward 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  transform-origin: left center;
+  backface-visibility: hidden;
+}
+
+.leaf-settle-forward {
+  animation: leaf-settle-forward 240ms cubic-bezier(0, 0, 0.2, 1);
+  transform-origin: left center;
+  backface-visibility: hidden;
+}
+
+.leaf-away-back {
+  animation: leaf-away-back 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  transform-origin: right center;
+  backface-visibility: hidden;
+}
+
+.leaf-settle-back {
+  animation: leaf-settle-back 240ms cubic-bezier(0, 0, 0.2, 1);
+  transform-origin: right center;
+  backface-visibility: hidden;
+}
+
+/* The shadow the lifting leaf casts back onto the page beneath. Without it the
+   turn reads as a flat rotation rather than a sheet of paper with a near and a
+   far edge. */
+.leaf-shadow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  animation: leaf-shadow 440ms ease-in-out;
+}
+
+@keyframes leaf-shadow {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  45% {
+    opacity: 0.55;
+  }
+}
+
+.leaf-shadow-forward {
+  background: linear-gradient(
+    to right,
+    color-mix(in oklab, var(--color-ink) 42%, transparent) 0%,
+    transparent 45%
+  );
+}
+
+.leaf-shadow-back {
+  background: linear-gradient(
+    to left,
+    color-mix(in oklab, var(--color-ink) 42%, transparent) 0%,
+    transparent 45%
+  );
+}
+
+/* ---- wizard -------------------------------------------------------------
+   The dialog should arrive rather than appear. Everything here is short:
+   motion that explains where a panel came from is useful, motion the reader
+   waits through is not. */
+
+@keyframes veil-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Steps slide in from the side they conceptually came from, so forward and
+   back feel different. */
+@keyframes step-in-forward {
+  from {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes step-in-back {
+  from {
+    opacity: 0;
+    transform: translateX(-18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Each source card settles a beat after the one before it. */
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.veil-in {
+  animation: veil-in 160ms ease-out;
+}
+.panel-in {
+  animation: panel-in 240ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.step-in-forward {
+  animation: step-in-forward 220ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.step-in-back {
+  animation: step-in-back 220ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.card-in {
+  animation: card-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1) backwards;
+}
+
+/* A tick that draws itself, for the finish step. */
+@keyframes check-draw {
+  from {
+    stroke-dashoffset: 30;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.check-draw {
+  stroke-dasharray: 30;
+  animation: check-draw 400ms 120ms ease-out backwards;
+}
+
+/* Respect a reader who has asked the system for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .leaf-away-forward,
+  .leaf-settle-forward,
+  .leaf-away-back,
+  .leaf-settle-back,
+  .leaf-shadow,
+  .veil-in,
+  .panel-in,
+  .step-in-forward,
+  .step-in-back,
+  .card-in,
+  .check-draw {
+    animation: none;
+  }
+}
