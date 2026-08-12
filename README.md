@@ -208,6 +208,28 @@ cargo run -p reading-core --example check-tls -- https://192.168.4.252:7878 serv
 
 That uses the same client the application does, and reports both halves: that the connection is refused *without* the certificate, and accepted with it. Windows `curl` cannot answer this — it uses schannel, which ignores `--cacert`.
 
+### Removing the server
+
+```bash
+.\scripts\uninstall-server.ps1 -DryRun
+```
+
+That takes an inventory and changes nothing. It reports what it found and, crucially, what the database holds — *"3 books, 412 pages, 96 summaries, written by 2 accounts"* — because that is the honest way to say what deleting it costs.
+
+To go through with it:
+
+```bash
+.\scripts\uninstall-server.ps1 -Backup C:\library-backup.sql
+```
+
+It removes the service, the install directory, the page photographs, the firewall rule, the database, and the role. It asks you to type `REMOVE` first — a y/n keystroke is too easy to make by accident.
+
+**The backup runs before the confirmation, and on a dry run too.** A backup you have not seen work is not a backup, and the moment to discover `pg_dump` is missing is not after the database has gone. Run with `-DryRun -Backup <path>` to produce a real dump and inspect it before committing to anything.
+
+Left alone unless you ask: PostgreSQL (`-RemovePostgres`), since other things may use it, and Ollama with its models (`-RemoveOllama`), since that is several GB to download again. `-KeepLibrary` rescues the page photographs; `-KeepDatabase` removes the service and files only.
+
+The desktop application is a separate program — uninstall it from Add or Remove Programs on the machine you read on.
+
 ### Building an installer
 
 ```bash
