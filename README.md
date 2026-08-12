@@ -159,7 +159,7 @@ Ollama must be running for transcription and coaching. If it isn't, the app says
 
 The point of the split: the server runs on the box with the GPU, and you read on whatever is to hand.
 
-No Rust toolchain is needed on the server. Build the two artefacts on your development machine:
+**One script, and it installs its own dependencies.** No Rust toolchain on the server. Build the two artefacts on your development machine:
 
 ```bash
 cargo build --release -p reading-server
@@ -168,27 +168,33 @@ cargo build --release -p reading-server
 npm run dict:build
 ```
 
-Copy five files to the server, into one directory:
+Copy **three files** to the server, into one directory:
 
 ```
-install-server.ps1       deploy-server.ps1        setup-postgres.ps1
+scripts/install-server.ps1
 target/release/reading-server.exe
 src-tauri/resources/dict.sqlite
 ```
 
-Then, on the server, from an **elevated** PowerShell:
+Then, from an **elevated** PowerShell there:
 
 ```bash
-$env:PGPASSWORD = 'your-postgres-password'; powershell -ExecutionPolicy Bypass -File .\install-server.ps1
+powershell -ExecutionPolicy Bypass -File .\install-server.ps1
 ```
 
-It checks everything before changing anything — elevation, the files, PostgreSQL, that the service is running, that the port is free — and prints what to fix if a check fails. Then it creates the database, installs into `C:\ReadingCompanion`, opens the port to your subnet only, and registers a service set to start automatically and restart on failure.
+That is the whole thing. It installs PostgreSQL if it is missing — generating the superuser password itself, so there is nothing to invent or remember — creates the role and database with a second generated password, installs into `C:\ReadingCompanion`, writes the configuration, opens the port to your subnet only, registers a service that starts automatically and restarts on failure, and checks the result actually answers before claiming success. The address it prints is what goes into the application's sign-in screen.
 
-It is safe to re-run: an existing database is left alone unless you pass `-Fresh`, and the service is replaced rather than duplicated. The address it prints at the end is what goes into the application's sign-in screen.
+Both generated passwords are saved to files readable only by Administrators. You never type either one.
+
+Every check runs **before** anything is changed — elevation, the files, the port — and a failure prints the whole list rather than stopping at the first. Safe to re-run: an existing database is left alone unless you pass `-Fresh`, and the service is replaced rather than duplicated.
+
+If PostgreSQL is already installed, it needs its superuser password: `$env:PGPASSWORD = '…'` before running, or `reset-postgres-password.ps1` if it has been lost.
+
+`setup-postgres.ps1` and `deploy-server.ps1` still exist and do the two halves separately, for when you want one without the other. `install-server.ps1` does not call them — it is self-contained, so it is the only file you need to copy.
 
 The server's configuration lives in `.env` beside the binary, readable only by Administrators. That is deliberate: a Windows service starts in `system32` rather than where it was installed, so it can only find configuration next to itself — and the alternative, machine-wide environment variables, would put the database password where every account on the box can read it.
 
-**PostgreSQL must be installed on the server first**, and it needs a superuser password you can produce. `reset-postgres-password.ps1` recovers it if not.
+There is **no TLS** on that port. The firewall rule keeps it to your own subnet, which is the intended shape; exposing it to the internet needs a reverse proxy in front, the way `secure-ollama-wan.ps1` does for Ollama.
 
 ### Building an installer
 

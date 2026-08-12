@@ -24,6 +24,13 @@ dist-ssr
 # megabytes each — this is the reader's data, not the project's.
 /library/
 
+# Artefacts install-server.ps1 gathers beside itself when run from a checkout:
+# a 17MB binary and the 40MB dictionary, both regenerable.
+/scripts/reading-server.exe
+/scripts/dict.sqlite
+/scripts/.env
+/scripts/postgres-superuser-password.txt
+
 # Dictionary build: the 23MB Webster's source and the 40MB database it
 # produces are both regenerable with `node scripts/build-dictionary.mjs`.
 .cache
