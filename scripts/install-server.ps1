@@ -21,8 +21,15 @@
     existing database is left alone unless you pass -Fresh, and the service is
     replaced rather than duplicated.
 
-    If reading-server.exe is not beside this script but a checkout is, and
-    cargo is installed, it will build it.
+    If reading-server.exe is not beside this script but a checkout is, it
+    builds it -- installing the Rust toolchain first if that is missing too.
+    The same goes for the dictionary. So on a server with a git clone and
+    nothing else, this script alone is enough.
+
+    That path is slow: the Rust toolchain and the MSVC C++ build tools it
+    links with are several GB, and the first build takes minutes because
+    SQLite is compiled from source. Building the binary on a machine that
+    already has Rust and copying two files is faster. Both work.
 
     Deliberately ASCII-only: PowerShell 5.1 reads a BOM-less .ps1 as ANSI, and
     a stray smart quote becomes a parse error on someone else's box.
@@ -53,6 +60,14 @@
 .PARAMETER SkipPostgresInstall
     Never install PostgreSQL, even if it is missing. Fail instead.
 
+.PARAMETER SkipRustInstall
+    Never install the Rust toolchain. Without it, reading-server.exe has to
+    be built elsewhere and copied here.
+
+.PARAMETER SkipDictBuild
+    Never build the dictionary. Word lookup is then unavailable until
+    dict.sqlite is supplied.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\install-server.ps1
 
@@ -73,7 +88,9 @@ param(
     [string]$SuperUserPassword,
     [switch]$Fresh,
     [switch]$Loopback,
-    [switch]$SkipPostgresInstall
+    [switch]$SkipPostgresInstall,
+    [switch]$SkipRustInstall,
+    [switch]$SkipDictBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -109,6 +126,86 @@ function New-Password {
         }
         return -join $chars
     } finally { $rng.Dispose() }
+}
+
+# Where cargo lands, whether or not this shell knows about it yet.
+function Find-Cargo {
+    $onPath = Get-Command cargo -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+
+    # rustup installs per-user and amends PATH for *new* shells, so a fresh
+    # install is invisible to this one until we go looking.
+    foreach ($dir in @("$env:USERPROFILE\.cargo\bin", "$env:CARGO_HOME\bin")) {
+        $candidate = Join-Path $dir 'cargo.exe'
+        if ($dir -and (Test-Path $candidate)) {
+            if ($env:PATH -notlike "*$dir*") { $env:PATH = "$dir;$env:PATH" }
+            return $candidate
+        }
+    }
+    return $null
+}
+
+# Install Rust and the C++ toolchain it links with.
+#
+# Two packages, because on Windows rustc needs a linker it does not ship:
+# the MSVC build tools provide link.exe and the Windows SDK. Installing
+# rustup alone produces a toolchain that fails at the last step of every
+# build, which is a worse outcome than not installing it.
+function Install-RustToolchain {
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        Write-Bad "winget is not available, so Rust cannot be installed automatically"
+        return $false
+    }
+
+    Write-Hmm "Installing the Rust toolchain. This is several GB and takes a while."
+
+    # The C++ build tools first: rustup's default host toolchain wants them,
+    # and installing in this order avoids a toolchain that cannot link.
+    if (-not (Test-Path 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools')) {
+        Write-Note "Visual Studio Build Tools, with the C++ workload..."
+        & winget install --id Microsoft.VisualStudio.2022.BuildTools --exact --silent `
+            --accept-package-agreements --accept-source-agreements `
+            --override "--quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+        # winget reports 'no applicable upgrade' as a failure when it is
+        # already present, so the filesystem is the authority rather than the
+        # exit code.
+        if (-not (Test-Path 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools')) {
+            Write-Bad "The C++ build tools did not install."
+            return $false
+        }
+        Write-Ok "C++ build tools"
+    } else {
+        Write-Ok "C++ build tools already present"
+    }
+
+    Write-Note "rustup..."
+    & winget install --id Rustlang.Rustup --exact --silent `
+        --accept-package-agreements --accept-source-agreements
+    # Exit code ignored for the same reason; presence is what matters.
+
+    $cargo = Find-Cargo
+    if (-not $cargo) {
+        # rustup may be installed without a default toolchain selected.
+        $rustup = Get-Command rustup -ErrorAction SilentlyContinue
+        if (-not $rustup -and (Test-Path "$env:USERPROFILE\.cargo\bin\rustup.exe")) {
+            $rustup = "$env:USERPROFILE\.cargo\bin\rustup.exe"
+        }
+        if ($rustup) {
+            & $rustup default stable-x86_64-pc-windows-msvc
+            $cargo = Find-Cargo
+        }
+    }
+
+    if (-not $cargo) {
+        Write-Bad "Rust installed but cargo cannot be found."
+        Write-Note "Open a new PowerShell and run this script again; rustup"
+        Write-Note "amends PATH only for shells started after it."
+        return $false
+    }
+
+    Write-Ok "Rust ($cargo)"
+    return $true
 }
 
 function Find-Psql {
@@ -157,35 +254,52 @@ if ($isAdmin) {
     $problems.Add("not elevated")
 }
 
+# A checkout beside or above this script. Found once, because both the binary
+# and the dictionary can be built from it.
+$repo = $null
+foreach ($candidate in @($here, (Split-Path -Parent $here))) {
+    if ($candidate -and (Test-Path (Join-Path $candidate 'crates\reading-server\Cargo.toml'))) {
+        $repo = $candidate
+        break
+    }
+}
+if ($repo) { Write-Ok "Checkout at $repo" }
+
 # --- The binary. Built here if it is missing and that is possible. ---
 $binary = Join-Path $here 'reading-server.exe'
 if (Test-Path $binary) {
     Write-Ok "reading-server.exe"
 } else {
-    # A checkout beside or above this script, with cargo available.
-    $repo = $null
-    foreach ($candidate in @($here, (Split-Path -Parent $here))) {
-        if ($candidate -and (Test-Path (Join-Path $candidate 'crates\reading-server\Cargo.toml'))) {
-            $repo = $candidate
-            break
+    $cargo = Find-Cargo
+
+    # No cargo, but a checkout: install the toolchain rather than send someone
+    # away to build it elsewhere. Opt out with -SkipRustInstall.
+    if ($repo -and -not $cargo -and -not $SkipRustInstall) {
+        Write-Hmm "reading-server.exe is missing and Rust is not installed"
+        Write-Note "There is a checkout at $repo, so it can be built here."
+        if (Install-RustToolchain) {
+            $cargo = Find-Cargo
         }
     }
-    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
 
     if ($repo -and $cargo) {
-        Write-Hmm "reading-server.exe is missing; building it from $repo"
-        Write-Note "This takes a few minutes the first time."
+        Write-Hmm "Building reading-server from $repo"
+        Write-Note "Several minutes the first time: SQLite is compiled from source."
         Push-Location $repo
         try {
-            & cargo build --release -p reading-server
+            & $cargo build --release -p reading-server
             if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+        } catch {
+            Write-Bad "The build failed: $_"
+            Write-Note "Run it by hand in $repo to see the errors in full."
+            $problems.Add("build failed")
         } finally { Pop-Location }
 
         $built = Join-Path $repo 'target\release\reading-server.exe'
         if (Test-Path $built) {
             Copy-Item $built $binary -Force
             Write-Ok "Built and copied here"
-        } else {
+        } elseif ($problems -notcontains "build failed") {
             Write-Bad "cargo finished but produced no binary"
             $problems.Add("no reading-server.exe")
         }
@@ -212,10 +326,10 @@ if (Test-Path $binary) {
         Write-Note "    target\release\reading-server.exe"
         Write-Note "    src-tauri\resources\dict.sqlite"
         Write-Note "to $here"
-        Write-Note ""
-        Write-Note "Or install Rust here and re-run, and this will build it:"
-        Write-Note "    winget install Rustlang.Rustup"
-        Write-Note "(that also needs the MSVC C++ build tools, several GB)"
+        if ($SkipRustInstall) {
+            Write-Note ""
+            Write-Note "Rust was not installed because -SkipRustInstall was given."
+        }
 
         $problems.Add("no reading-server.exe")
     }
@@ -223,13 +337,50 @@ if (Test-Path $binary) {
 
 # --- The dictionary. Optional, but the application is poorer without it. ---
 $dict = Join-Path $here 'dict.sqlite'
+if (-not (Test-Path $dict)) {
+    # A checkout may already have one from an earlier build.
+    $repoDict = $null
+    foreach ($candidate in @($here, (Split-Path -Parent $here))) {
+        $guess = Join-Path $candidate 'src-tauri\resources\dict.sqlite'
+        if ($candidate -and (Test-Path $guess)) { $repoDict = $guess; break }
+    }
+
+    if ($repoDict) {
+        Copy-Item $repoDict $dict -Force
+        Write-Ok "dict.sqlite found in the checkout"
+    } elseif ($repo -and (Get-Command node -ErrorAction SilentlyContinue) -and -not $SkipDictBuild) {
+        # Buildable here: it downloads Webster's 1913 and compiles it. Worth
+        # doing rather than shipping a reader a dictionary-less library, since
+        # period definitions are half the point of the application.
+        Write-Hmm "dict.sqlite is missing; building it from $repo"
+        Write-Note "Downloads about 23MB and takes a couple of minutes."
+        Push-Location $repo
+        try {
+            if (-not (Test-Path (Join-Path $repo 'node_modules'))) {
+                & npm install --silent
+            }
+            & node scripts/build-dictionary.mjs
+        } catch {
+            Write-Hmm "The dictionary build failed: $_"
+        } finally { Pop-Location }
+
+        $built = Join-Path $repo 'src-tauri\resources\dict.sqlite'
+        if (Test-Path $built) {
+            Copy-Item $built $dict -Force
+            Write-Ok "dict.sqlite built"
+        }
+    }
+}
+
 if (Test-Path $dict) {
     Write-Ok ("dict.sqlite ({0} MB)" -f [Math]::Round((Get-Item $dict).Length / 1MB, 1))
 } else {
+    # Never fatal: the application runs without it, with less.
     Write-Hmm "dict.sqlite is missing"
     Write-Note "Word lookup will be unavailable and hyphenation falls back to a"
-    Write-Note "heuristic. Build it with 'npm run dict:build' and copy"
-    Write-Note "src-tauri\resources\dict.sqlite here to have it."
+    Write-Note "heuristic. Everything else works. To add it later, run"
+    Write-Note "'npm run dict:build' on a machine with Node and copy"
+    Write-Note "src-tauri\resources\dict.sqlite into the install directory."
 }
 
 # --- The port. ---
