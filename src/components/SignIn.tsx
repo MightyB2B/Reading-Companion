@@ -59,7 +59,20 @@ export function SignIn({ onSignedIn }: { onSignedIn: (account: Account) => void 
     }
   };
 
-  const registering = server?.needs_setup === true;
+  /**
+   * Which form is showing.
+   *
+   * An empty server starts on registration, because there is nothing to sign
+   * in to yet. Otherwise it starts on sign-in and the reader can switch, if
+   * the server allows new accounts at all.
+   */
+  const [creating, setCreating] = useState(false);
+  useEffect(() => {
+    if (server?.needs_setup) setCreating(true);
+  }, [server?.needs_setup]);
+
+  const registering = creating && server?.registration_open !== false;
+  const canSwitch = server?.registration_open === true && !server.needs_setup;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -82,9 +95,11 @@ export function SignIn({ onSignedIn }: { onSignedIn: (account: Account) => void 
       <div className="panel-in w-full max-w-sm">
         <h1 className="font-serif text-2xl">Reading Companion</h1>
         <p className="mt-1 text-sm text-ink-soft">
-          {registering
-            ? "This library has no accounts yet. The first one is yours."
-            : "Sign in to your library."}
+          {server?.needs_setup
+            ? "This library has no accounts yet. The first one is yours, and it is the administrator."
+            : registering
+              ? "Create an account on this library."
+              : "Sign in to your library."}
         </p>
 
         <form onSubmit={submit} className="mt-6">
@@ -176,9 +191,35 @@ export function SignIn({ onSignedIn }: { onSignedIn: (account: Account) => void 
             className="mt-5 flex w-full items-center justify-center gap-2 rounded bg-accent px-4 py-2 text-sm text-paper disabled:opacity-40"
           >
             {busy && <Spinner size={16} />}
-            {registering ? "Create the library" : "Sign in"}
+            {server?.needs_setup
+              ? "Create the library"
+              : registering
+                ? "Create the account"
+                : "Sign in"}
           </button>
+
+          {canSwitch && (
+            <button
+              type="button"
+              onClick={() => {
+                setCreating((c) => !c);
+                setError(null);
+              }}
+              className="mt-3 w-full text-center text-xs text-ink-soft hover:text-accent"
+            >
+              {creating
+                ? "I already have an account"
+                : "Create an account on this library"}
+            </button>
+          )}
         </form>
+
+        {server && !server.registration_open && (
+          <p className="mt-4 text-xs text-ink-soft">
+            This library is not accepting new accounts. Its administrator can
+            turn that on in Settings.
+          </p>
+        )}
 
         <p className="mt-5 text-xs text-ink-soft">
           Your books stay on the server you name above. Nothing is sent

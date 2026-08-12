@@ -28,6 +28,7 @@ pub struct PublicSettings {
     pub text_model: String,
     pub vision_model: String,
     pub keep_alive: String,
+    pub open_registration: bool,
 }
 
 impl From<Settings> for PublicSettings {
@@ -39,6 +40,7 @@ impl From<Settings> for PublicSettings {
             text_model: s.text_model,
             vision_model: s.vision_model,
             keep_alive: s.keep_alive,
+            open_registration: s.open_registration,
         }
     }
 }
@@ -55,6 +57,10 @@ pub struct SettingsUpdate {
     pub text_model: String,
     pub vision_model: String,
     pub keep_alive: String,
+    /// Absent leaves it as it was, so a client that does not know about this
+    /// setting cannot turn it on by omission.
+    #[serde(default)]
+    pub open_registration: Option<bool>,
 }
 
 pub async fn get_settings(
@@ -81,7 +87,12 @@ pub async fn save_settings(
         text_model: non_empty(&body.text_model, &existing.text_model),
         vision_model: non_empty(&body.vision_model, &existing.vision_model),
         keep_alive: non_empty(&body.keep_alive, &existing.keep_alive),
+        open_registration: body.open_registration.unwrap_or(existing.open_registration),
     };
+
+    if cleaned.open_registration && !existing.open_registration {
+        tracing::warn!("registration opened: anyone who can reach this server can now create an account");
+    }
 
     cleaned.save(&state.db).await?;
     *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = cleaned.clone();

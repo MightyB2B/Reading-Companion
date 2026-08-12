@@ -313,6 +313,37 @@ export function SettingsWindow({
                 </p>
               </Section>
 
+              <Section
+                title="Who may join"
+                detail="Off by default. The first account on an empty library can always be created, so leaving this off never locks anyone out."
+              >
+                <label className="flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    checked={settings.open_registration ?? false}
+                    onChange={(e) =>
+                      edit({ open_registration: e.target.checked })
+                    }
+                    className="mt-0.5"
+                  />
+                  <span className="text-sm">
+                    Anyone who can reach this server may create an account
+                    <span className="mt-0.5 block text-xs text-ink-soft">
+                      Turn this on to let someone else join, then turn it off
+                      again. Each account's books are private to it.
+                    </span>
+                  </span>
+                </label>
+
+                {settings.open_registration && (
+                  <p className="mt-2.5 rounded border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs text-amber-700">
+                    While this is on, anyone who can reach the address above can
+                    register — including anyone on the internet if you have
+                    exposed it.
+                  </p>
+                )}
+              </Section>
+
               <Section title="Appearance">
                 <label className="block text-sm font-medium" htmlFor="theme">
                   Theme

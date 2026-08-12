@@ -22,6 +22,14 @@ pub struct Settings {
     pub vision_model: String,
     /// How long the inference server holds a model after a request.
     pub keep_alive: String,
+    /// May anyone who can reach this server create an account?
+    ///
+    /// False by default, and deliberately so. The bootstrap case — an empty
+    /// server, where the first arrival has to be able to register — is handled
+    /// separately, so leaving this off does not lock anyone out of a new
+    /// library. What it prevents is a server exposed to a network staying open
+    /// to signups forever because nobody thought to close it.
+    pub open_registration: bool,
 }
 
 impl Default for Settings {
@@ -33,6 +41,7 @@ impl Default for Settings {
             text_model: reading_core::ollama::DEFAULT_TEXT_MODEL.to_string(),
             vision_model: reading_core::ollama::DEFAULT_VISION_MODEL.to_string(),
             keep_alive: reading_core::ollama::DEFAULT_KEEP_ALIVE.to_string(),
+            open_registration: false,
         }
     }
 }
@@ -61,6 +70,12 @@ impl Settings {
         if let Some(v) = db.get_setting("keep_alive").await? {
             settings.keep_alive = v;
         }
+        if let Some(v) = db.get_setting("open_registration").await? {
+            // Anything that is not exactly "true" is false. A malformed value
+            // must fail closed: the failure mode of guessing the other way is
+            // an open server.
+            settings.open_registration = v == "true";
+        }
 
         Ok(settings)
     }
@@ -72,6 +87,11 @@ impl Settings {
         db.set_setting("text_model", &self.text_model).await?;
         db.set_setting("vision_model", &self.vision_model).await?;
         db.set_setting("keep_alive", &self.keep_alive).await?;
+        db.set_setting(
+            "open_registration",
+            if self.open_registration { "true" } else { "false" },
+        )
+        .await?;
         Ok(())
     }
 

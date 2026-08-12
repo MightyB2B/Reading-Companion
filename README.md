@@ -140,7 +140,9 @@ npm run tauri dev
 
 The first launch compiles Rust and takes a few minutes; later ones take seconds. Keep both terminals open.
 
-The first time you run it, the sign-in screen offers to create an account instead — the first account on a fresh library becomes the administrator, since someone has to be able to set the inference server's address.
+**There is no default account.** A shipped username and password is a backdoor, and one nobody remembers to change. Instead, the first time you run it the sign-in screen offers to *create* an account — and that first account on an empty library becomes the administrator, since someone has to be able to set the inference server's address.
+
+Registration then closes behind it. To let somebody else join, turn on **Settings → Who may join**, have them register, and turn it off again; accounts created that way are ordinary, not administrators. It is off by default because a server reachable from a network would otherwise stay an open signup form forever — but an empty library always accepts its first account, so leaving it off can never lock you out of a new one.
 
 Ollama must be running for transcription and coaching. If it isn't, the app says so rather than failing obscurely.
 
@@ -451,6 +453,8 @@ npx tsc --noEmit
 No telemetry, and no third-party inference. Everything happens on machines you run: the application, the library server, Postgres, and Ollama.
 
 That said, be precise about what "local" means now. If you point the app at a server on another machine — which is the point of the split — then **page images and paragraph text travel to that machine**, and to whatever Ollama the server is configured for. On a LAN that is your own network. Over the internet it is not, which is why `scripts/secure-ollama-wan.ps1` exists and why the server logs a warning when you bind it to a public interface. There is no TLS in the server itself; put a reverse proxy in front before exposing it.
+
+**No account ships with the application.** The first person to reach an empty library creates one and becomes its administrator; after that, registration is closed unless an administrator opens it. Both paths are covered by `scripts/check-api.sh`, including that a later account never gets administrator rights and that a client which does not know about the setting cannot enable it by omitting the field.
 
 **Accounts are isolated by construction.** `books.user_id` is the only place ownership is recorded, and every query reaches it by joining rather than by a check a new endpoint could forget. Asking for someone else's book reports "not found" rather than "forbidden", because telling those apart confirms the id exists. `scripts/check-api.sh` tries to cross the boundary in every direction and fails the build if any attempt succeeds.
 

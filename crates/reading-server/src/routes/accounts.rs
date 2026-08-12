@@ -57,10 +57,24 @@ impl From<reading_core::db::pg::User> for UserResponse {
 ///
 /// Signing in as part of registering saves a round trip and avoids the
 /// possibility of an account that exists but was never entered.
+///
+/// Open in exactly two situations: the server has no accounts at all, so
+/// somebody has to be able to make the first one; or an administrator has
+/// deliberately turned registration on. Otherwise a server reachable from a
+/// network would accept signups from anyone who found the port.
 pub async fn register(
     State(state): State<AppState>,
     Json(body): Json<RegisterRequest>,
 ) -> ApiResult<Json<SessionResponse>> {
+    let bootstrapping = !state.db.has_any_user().await?;
+    if !bootstrapping && !state.settings().open_registration {
+        return Err(reading_core::AppError::Invalid(
+            "this library is not accepting new accounts. Ask its administrator to turn registration on."
+                .into(),
+        )
+        .into());
+    }
+
     let display_name = if body.display_name.trim().is_empty() {
         body.email.split('@').next().unwrap_or("reader").to_string()
     } else {
@@ -119,12 +133,17 @@ pub async fn sign_out(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// Whether this server has any accounts yet.
+/// What the sign-in screen needs to know before it can draw itself.
 ///
-/// The sign-in screen uses it to offer registration on a fresh server without
-/// making the reader guess. It reveals only that the server is unconfigured,
-/// which is apparent from being able to register at all.
+/// Unauthenticated, and it says only whether an account can be created — which
+/// is discoverable anyway by trying. It does not say how many accounts exist
+/// or who they belong to.
 pub async fn needs_setup(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let any = state.db.has_any_user().await?;
-    Ok(Json(serde_json::json!({ "needs_setup": !any })))
+    Ok(Json(serde_json::json!({
+        "needs_setup": !any,
+        // Registration is possible on an empty server whatever the setting
+        // says, or the first person could never get in.
+        "registration_open": !any || state.settings().open_registration,
+    })))
 }

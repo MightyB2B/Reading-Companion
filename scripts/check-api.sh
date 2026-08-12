@@ -59,9 +59,16 @@ expect "a malformed header"     401 "$(curl -s -o /dev/null -w '%{http_code}' -H
 echo
 echo "--- registration ---"
 A=$(body POST /register '' "{\"email\":\"ann-$TAG@example.test\",\"password\":\"a long enough one\"}")
-B=$(body POST /register '' "{\"email\":\"ben-$TAG@example.test\",\"password\":\"a long enough one\"}")
 TA=$(echo "$A" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+
+# Ann got in because the server was empty. Registration closes behind her, so
+# a second account needs her to open it -- which is the property the section
+# further down tests properly.
+OPEN=$(printf '{"ollama_host":"http://127.0.0.1:11434","ocr_model":"glm-ocr","text_model":"qwen3:4b","vision_model":"qwen3-vl:4b","keep_alive":"30m","open_registration":true}')
+code PUT /settings "$TA" "$OPEN" >/dev/null
+B=$(body POST /register '' "{\"email\":\"ben-$TAG@example.test\",\"password\":\"a long enough one\"}")
 TB=$(echo "$B" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+code PUT /settings "$TA" "$(echo "$OPEN" | sed 's/"open_registration":true/"open_registration":false/')" >/dev/null
 [ -n "$TA" ] && echo "  ok   ann registered and signed in" || { echo "  FAIL ann: $A"; fail=1; }
 [ -n "$TB" ] && echo "  ok   ben registered and signed in" || { echo "  FAIL ben: $B"; fail=1; }
 
@@ -119,6 +126,28 @@ expect "saving without the key field"      200 "$(code PUT /settings "$TA" "$S")
 body GET /settings "$TA" | grep -q '"has_api_key":true' && echo "  ok   the key survived a save that omitted it" || { echo "  FAIL an omitted key field cleared the key"; fail=1; }
 expect "clearing it explicitly"            200 "$(code PUT /settings "$TA" "$(printf '{"ollama_host":"http://127.0.0.1:11434","ollama_api_key":"","ocr_model":"glm-ocr","text_model":"qwen3:4b","vision_model":"qwen3-vl:4b","keep_alive":"30m"}')")"
 body GET /settings "$TA" | grep -q '"has_api_key":false' && echo "  ok   an empty string clears it" || { echo "  FAIL empty string did not clear the key"; fail=1; }
+
+echo
+echo "--- registration is closed once the library exists ---"
+# The bootstrap case is above: ann registered on an empty server. Ben got in
+# only because that same request had not yet been made when he tried. From
+# here on a third party must be refused, or a server on a network is an open
+# signup form forever.
+expect "a stranger registers"     400 "$(code POST /register '' "{\"email\":\"gate-$TAG@example.test\",\"password\":\"a long enough one\"}")"
+body GET /setup-state | grep -q '"registration_open":false' && echo "  ok   and the sign-in screen is told so" || { echo "  FAIL setup-state still says registration is open"; fail=1; }
+
+expect "ben opens registration"   404 "$(code PUT /settings "$TB" "$OPEN")"
+expect "ann opens registration"   200 "$(code PUT /settings "$TA" "$OPEN")"
+expect "now a stranger can"       200 "$(code POST /register '' "{\"email\":\"gate-$TAG@example.test\",\"password\":\"a long enough one\"}")"
+body POST /register '' "{\"email\":\"gate2-$TAG@example.test\",\"password\":\"a long enough one\"}" | grep -q '"is_admin":false' && echo "  ok   but not as an administrator" || { echo "  FAIL a later account got admin"; fail=1; }
+
+CLOSED=$(echo "$OPEN" | sed 's/"open_registration":true/"open_registration":false/')
+expect "ann closes it again"      200 "$(code PUT /settings "$TA" "$CLOSED")"
+expect "and it is shut"           400 "$(code POST /register '' "{\"email\":\"gate3-$TAG@example.test\",\"password\":\"a long enough one\"}")"
+
+# A client that predates this setting must not turn it on by omission.
+expect "saving without the field" 200 "$(code PUT /settings "$TA" "$S")"
+body GET /settings "$TA" | grep -q '"open_registration":false' && echo "  ok   an omitted field leaves it closed" || { echo "  FAIL omitting the field opened registration"; fail=1; }
 
 echo
 echo "--- dictionary ---"

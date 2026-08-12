@@ -237,6 +237,13 @@ export interface Settings {
   vision_model: string;
   /** How long the server holds a model — "30m", "2h", or "-1" for never. */
   keep_alive: string;
+  /**
+   * May anyone who can reach the server create an account?
+   *
+   * Off by default. The first account on an empty server can always be
+   * created regardless, so leaving this off never locks anyone out.
+   */
+  open_registration?: boolean;
 }
 
 /**
@@ -261,8 +268,10 @@ export interface Account {
 
 export interface ServerState {
   reachable: boolean;
-  /** No accounts yet, so offer to create the first one. */
+  /** No accounts yet, so the first one can be created. */
   needs_setup: boolean;
+  /** Whether an account can be created at all — see `open_registration`. */
+  registration_open: boolean;
   signed_in: boolean;
 }
 
@@ -280,6 +289,7 @@ export const DEFAULT_SETTINGS: Settings = {
   text_model: "qwen3:4b",
   vision_model: "qwen3-vl:4b",
   keep_alive: "30m",
+  open_registration: false,
 };
 
 export const api = {
