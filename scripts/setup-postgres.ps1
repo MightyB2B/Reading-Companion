@@ -134,16 +134,16 @@ if (-not $env:PGPASSWORD) {
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $migrationDir = Join-Path $repoRoot 'crates\reading-core\migrations'
 
-if (-not (Test-Path $migrationDir)) {
-    throw "No migrations directory at $migrationDir. Run this from the repository."
+# Only for reporting. The schema is embedded in the server binary and applied
+# on its first run, so this script is useful on a machine that has the binary
+# and no repository at all -- which is the normal shape of a deployment.
+$migrations = @()
+if (Test-Path $migrationDir) {
+    $migrations = @(Get-ChildItem $migrationDir -Filter '*.sql' | Sort-Object Name)
+    Write-Host "Migrations: $($migrations.Count) file(s), applied by the server" -ForegroundColor DarkGray
+} else {
+    Write-Host "No repository here; the server will apply its own schema." -ForegroundColor DarkGray
 }
-
-$migrations = @(Get-ChildItem $migrationDir -Filter '*.sql' | Sort-Object Name)
-if ($migrations.Count -eq 0) {
-    throw "No .sql files in $migrationDir."
-}
-
-Write-Host "Migrations: $($migrations.Count) file(s) in $migrationDir" -ForegroundColor DarkGray
 
 # --- 2. Password generation --------------------------------------------------
 
@@ -302,7 +302,7 @@ try {
 }
 
 Write-Host "    The schema is created by the application on first run," -ForegroundColor DarkGray
-Write-Host "    from $($migrations.Count) migration(s) embedded in the binary." -ForegroundColor DarkGray
+Write-Host "    from the migrations embedded in the binary." -ForegroundColor DarkGray
 
 # --- 6. Write .env -----------------------------------------------------------
 

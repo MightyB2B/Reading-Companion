@@ -155,6 +155,41 @@ Ollama must be running for transcription and coaching. If it isn't, the app says
 | `LIBRARY_DIR` | where page images go, default `./library` |
 | `DICT_PATH` | default `./dict.sqlite` |
 
+### Putting the server on another machine
+
+The point of the split: the server runs on the box with the GPU, and you read on whatever is to hand.
+
+No Rust toolchain is needed on the server. Build the two artefacts on your development machine:
+
+```bash
+cargo build --release -p reading-server
+```
+```bash
+npm run dict:build
+```
+
+Copy five files to the server, into one directory:
+
+```
+install-server.ps1       deploy-server.ps1        setup-postgres.ps1
+target/release/reading-server.exe
+src-tauri/resources/dict.sqlite
+```
+
+Then, on the server, from an **elevated** PowerShell:
+
+```bash
+$env:PGPASSWORD = 'your-postgres-password'; powershell -ExecutionPolicy Bypass -File .\install-server.ps1
+```
+
+It checks everything before changing anything — elevation, the files, PostgreSQL, that the service is running, that the port is free — and prints what to fix if a check fails. Then it creates the database, installs into `C:\ReadingCompanion`, opens the port to your subnet only, and registers a service set to start automatically and restart on failure.
+
+It is safe to re-run: an existing database is left alone unless you pass `-Fresh`, and the service is replaced rather than duplicated. The address it prints at the end is what goes into the application's sign-in screen.
+
+The server's configuration lives in `.env` beside the binary, readable only by Administrators. That is deliberate: a Windows service starts in `system32` rather than where it was installed, so it can only find configuration next to itself — and the alternative, machine-wide environment variables, would put the database password where every account on the box can read it.
+
+**PostgreSQL must be installed on the server first**, and it needs a superuser password you can produce. `reset-postgres-password.ps1` recovers it if not.
+
 ### Building an installer
 
 ```bash

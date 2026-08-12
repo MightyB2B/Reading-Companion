@@ -28,9 +28,44 @@ use crate::state::{AppState, Settings};
 /// arbitrarily large and the server will try to hold all of it.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+/// Load `.env` from beside the executable, then from the working directory.
+///
+/// That order matters. A Windows service starts in `system32`, not where it
+/// was installed, so a deployed server can only find its configuration next
+/// to its own binary — and the alternative, machine-wide environment
+/// variables, would put the database password where every account on the box
+/// can read it.
+///
+/// Both are tried rather than the first that works, because `dotenvy` never
+/// overwrites a variable that is already set: whichever file is read first
+/// wins, and the deployed one should. In development there is no `.env` beside
+/// `target/debug/`, so the repository's own is found by the second call.
+///
+/// Returns where it read from, for the startup log. A server that cannot find
+/// its configuration otherwise fails several lines later with something that
+/// looks unrelated — a permission error on a path nobody chose.
+fn load_env() -> Vec<String> {
+    let mut loaded = Vec::new();
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let beside = dir.join(".env");
+            if beside.exists() && dotenvy::from_path(&beside).is_ok() {
+                loaded.push(beside.display().to_string());
+            }
+        }
+    }
+
+    if let Ok(path) = dotenvy::dotenv() {
+        loaded.push(path.display().to_string());
+    }
+
+    loaded
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    let env_files = load_env();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -38,6 +73,14 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "reading_server=info,tower_http=warn".into()),
         )
         .init();
+
+    if env_files.is_empty() {
+        tracing::info!("no .env found; using the environment as it stands");
+    } else {
+        for path in &env_files {
+            tracing::info!(path = %path, "read configuration");
+        }
+    }
 
     let database_url = std::env::var("DATABASE_URL").map_err(|_| {
         anyhow::anyhow!(
@@ -68,8 +111,19 @@ async fn main() -> anyhow::Result<()> {
     let library_dir: PathBuf = std::env::var("LIBRARY_DIR")
         .unwrap_or_else(|_| "library".into())
         .into();
-    std::fs::create_dir_all(&library_dir)?;
+
+    // Named before it is created. A relative default resolves against the
+    // working directory, which for a service is system32 — and the resulting
+    // "access denied" says nothing about which path was refused or why it was
+    // chosen.
     tracing::info!(path = %library_dir.display(), "library directory");
+    std::fs::create_dir_all(&library_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "could not create the library directory at {}: {e}. \
+             Set LIBRARY_DIR to somewhere writable.",
+            library_dir.display()
+        )
+    })?;
 
     // The application works without the dictionary: hyphenation falls back to
     // a case heuristic and word lookup is unavailable, rather than the server
