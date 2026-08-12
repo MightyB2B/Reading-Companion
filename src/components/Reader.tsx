@@ -46,10 +46,19 @@ export function Reader({ book }: { book: Book }) {
   const [job, setJob] = useState<JobProgress | null>(null);
   // The sentence currently being worked on, lit up in the page text.
   const [activeSentence, setActiveSentence] = useState<string | null>(null);
-  // Two phases: the leaf lifts away, the content swaps, the next page settles.
+  /**
+   * A page turn in progress.
+   *
+   * `leaving` is a frozen copy of the page being turned away from. The live
+   * pane switches to the next page immediately and the copy is animated over
+   * the top of it, so the page you can interact with is never the one being
+   * rotated — which is what makes this work at all. StPageFlip renders the
+   * real thing, but it clones the page elements into its own wrapper, and a
+   * clone has no click-to-focus, no word selection, and no inline correction.
+   */
   const [turn, setTurn] = useState<{
     direction: "forward" | "back";
-    phase: "away" | "settle";
+    leaving: Block[];
   } | null>(null);
 
   // Bumped whenever pages change, so the navigator refetches its outline.
@@ -222,14 +231,12 @@ export function Reader({ book }: { book: Book }) {
     if (!next || turn) return;
     setSelected(null);
 
-    setTurn({ direction, phase: "away" });
-    // The swap happens once the leaf has lifted clear, so the next page is
-    // revealed by the turn rather than appearing through it.
-    window.setTimeout(() => {
-      setPageId(next.id);
-      setTurn({ direction, phase: "settle" });
-    }, 200);
-    window.setTimeout(() => setTurn(null), 450);
+    // Freeze what is on screen, then move underneath it at once. The leaf
+    // covers the swap, so the next page is uncovered by the turn rather than
+    // appearing through it.
+    setTurn({ direction, leaving: blocks });
+    setPageId(next.id);
+    window.setTimeout(() => setTurn(null), LEAF_DURATION);
   };
 
   // Arrow keys turn pages, but not while the reader is typing a summary.
@@ -394,16 +401,38 @@ export function Reader({ book }: { book: Book }) {
           </p>
         )}
 
-        <div className="page-stage relative min-h-0 flex-1">
+        <div
+          className="page-stage relative min-h-0 flex-1 overflow-hidden"
+          // Fed to CSS from the one constant, so the animation and the timer
+          // that clears the leaf cannot drift apart.
+          style={{ "--leaf-duration": `${LEAF_DURATION}ms` } as React.CSSProperties}
+        >
+          {/* The sheet being turned: the outgoing page on its front, blank
+              paper on its back, rotating a full half-turn about the spine. */}
           {turn && (
-            <div
-              className={`leaf-shadow leaf-shadow-${turn.direction}`}
-              aria-hidden="true"
-            />
+            <>
+              <div
+                className={`leaf-cast-shadow leaf-cast-${turn.direction}`}
+                aria-hidden="true"
+              />
+              <div className={`leaf leaf-${turn.direction}`} aria-hidden="true">
+                <div className="leaf-face">
+                  <div className="h-full overflow-hidden px-8 py-6">
+                    <div className="space-y-4">
+                      {turn.leaving.map((b) => (
+                        <FrozenBlock key={b.id} block={b} />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="leaf-face leaf-face-back" />
+              </div>
+            </>
           )}
+
           <div
             className={`h-full overflow-y-auto px-8 py-6 ${
-              turn ? `leaf-${turn.phase}-${turn.direction}` : ""
+              turn ? "page-settling" : ""
             }`}
           >
           {busy && progress && (
@@ -489,6 +518,29 @@ export function Reader({ book }: { book: Book }) {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * How long a leaf takes to turn. Kept in step with `--leaf-duration` in the
+ * stylesheet: the animation is CSS, but React has to know when to take the
+ * spent leaf off the stage.
+ */
+const LEAF_DURATION = 620;
+
+/**
+ * A block as it appears on the sheet being turned away.
+ *
+ * Deliberately inert — no click target, no word selection, no editing. It
+ * exists for about half a second and is only ever seen in motion, so it
+ * carries the text and nothing else.
+ */
+function FrozenBlock({ block }: { block: Block }) {
+  if (block.kind === "heading") {
+    return <h2 className="prose-page font-semibold">{block.text_norm}</h2>;
+  }
+  return (
+    <p className="prose-page px-3 py-2">{block.text_norm}</p>
   );
 }
 

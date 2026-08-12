@@ -178,6 +178,8 @@ src/
 src-tauri/src/
   commands.rs             The whole IPC surface. Thin — logic lives below.
   lib.rs                  Plugin and command registration
+
+crates/reading-core/src/  The engine. No UI, no transport.
   models.rs  error.rs
   db/
     mod.rs                  Queries and migrations
@@ -193,7 +195,10 @@ src-tauri/src/
   dict/                   Two-layer lookup
   coach/                  The rubric, and why it is a rubric
   ollama/                 HTTP client, prompts, guardrails
+  examples/               Diagnostic tools — see "Diagnostic tools" below
 ```
+
+This is a cargo workspace. `reading-core` holds everything the app does that is not drawing, and depends on nothing from Tauri — the check is `grep -r "tauri::" crates/reading-core/`, which should stay empty. That constraint is what lets the same engine run in-process on a laptop and behind an HTTP server, rather than the logic existing twice.
 
 `commands.rs` and `src/lib/api.ts` are the two ends of the same wire. Reading them side by side is the fastest way to understand the app.
 
@@ -242,16 +247,16 @@ Unit tests use fixtures; these run the real thing. Each exists because something
 cd src-tauri
 
 # Orientation and spread detection, with the measurements behind the decision
-cargo run --example check-gutter -- path/to/photo.jpg
+cargo run -p reading-core --example check-gutter -- path/to/photo.jpg
 
 # What an EPUB extracts to: spine, contents, chapters per division
-cargo run --example check-epub -- path/to/book.epub
+cargo run -p reading-core --example check-epub -- path/to/book.epub
 
 # The outline the navigator will show, from a real library
-cargo run --example check-outline -- "%APPDATA%/com.rec0n.book-companion/library.sqlite"
+cargo run -p reading-core --example check-outline -- "%APPDATA%/com.rec0n.book-companion/library.sqlite"
 
 # EPUB / PDF / web extraction
-cargo run --example check-ingest -- <file-or-url>
+cargo run -p reading-core --example check-ingest -- <file-or-url>
 ```
 
 `check-gutter` prints the numbers, not just the verdict, which is what makes a threshold arguable:
@@ -274,7 +279,9 @@ sqlite3 "$APPDATA/com.rec0n.book-companion/library.sqlite" \
 
 ### Changing the models
 
-Defaults are in `src-tauri/src/ollama/mod.rs`:
+Day to day, use **Settings** (the gear in the header). It asks the server what it has installed and offers those as dropdowns, so a model you never pulled cannot be chosen by mistake. The two roles that look at an image only list models reporting the `vision` capability.
+
+Defaults, used until you change them, are in `src-tauri/src/ollama/mod.rs`:
 
 ```rust
 pub const DEFAULT_OCR_MODEL: &str = "glm-ocr";
@@ -283,6 +290,32 @@ pub const DEFAULT_VISION_MODEL: &str = "qwen3-vl:4b";
 ```
 
 The OCR prompt and its guardrails are in the same file. If you swap the OCR model, re-run `check-gutter` and a real page first — the constants there were calibrated against measurements, not chosen from documentation.
+
+### Running the models somewhere else
+
+Settings also takes the **Ollama address**. Inference does not have to happen on the machine you are reading on: point it at a desktop with a real GPU and an 8GB laptop can use a 30B model. Test the address before saving — the button says outright whether the server answered.
+
+A bare `192.168.1.50:11434` is expanded to `http://192.168.1.50:11434`. The remote Ollama needs `OLLAMA_HOST=0.0.0.0` set, or it listens only to itself.
+
+On a Windows server with Ollama already installed, `scripts/setup-ollama-server.ps1` does the whole thing — binds every interface, adds a firewall rule scoped to your subnet, restarts Ollama, pulls the models, and prints the address to paste into Settings. Run it **on the server**, not on the reading machine:
+
+```bash
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-ollama-server.ps1
+```
+
+Run it from an elevated prompt so it can add the firewall rule; without elevation it does everything else and prints the one command you need to run as admin. Defaults assume a dedicated box: three models resident, never unloaded. `-MaxLoaded 2` and `-KeepAlive 30m` suit a machine you also use for other things.
+
+Ollama has no authentication. The firewall scope is what protects it, so do not forward that port on your router — put a reverse proxy requiring a bearer token in front instead, and give the token to the API key field.
+
+### Keeping models loaded
+
+Loading a model costs 5–10 seconds, so Settings has **Keeping models loaded**: how long the server holds one after it has been used. Default 30 minutes, which covers a reading session on a machine you also use for other things. On a dedicated server pick **Never unload** — there is nothing to give the VRAM back to.
+
+This is sent with every request, which means it *overrides* `OLLAMA_KEEP_ALIVE` on the server. Setting the environment variable alone does nothing while the app is talking; the setting is the one that decides.
+
+For a hosted or public Ollama-compatible endpoint, fill in the **API key**; it is sent as `Authorization: Bearer …` on every request. Leave it blank for a local server, which wants no authentication at all. The key lives in `library.sqlite` in plain text — that file deserves the same care as the key.
+
+Changing either takes effect immediately. The HTTP client is rebuilt, not the app restarted, so you can move inference mid-chapter.
 
 ### Troubleshooting
 
@@ -301,6 +334,8 @@ taskkill /IM book-companion.exe /F
 **"Ollama is not running"** in the app header — start it with `ollama serve`, then reload. The badge turns green when both models are present.
 
 **"models are missing"** — the header names them and gives the `ollama pull` command.
+
+**"rejected the API key"** when testing a server — the server is reachable, so the network is fine. Check the key, or clear it if the server does not want one.
 
 **Dictionary lookups do nothing** — `dict.sqlite` was never built. Run `npm run dict:build`. The app logs `dictionary unavailable` on startup when it is absent.
 

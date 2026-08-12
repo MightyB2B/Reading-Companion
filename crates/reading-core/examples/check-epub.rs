@@ -7,7 +7,7 @@
 //!
 //! Usage: cargo run --example check-epub -- <file.epub>
 
-use book_companion_lib::ingest::html;
+use reading_core::ingest::html;
 
 fn main() {
     let Some(path) = std::env::args().nth(1) else {
@@ -40,7 +40,7 @@ fn main() {
 
     // What the importer actually produces now.
     println!("\n--- full import ---");
-    match book_companion_lib::ingest::epub_source::read(std::path::Path::new(&path)) {
+    match reading_core::ingest::epub_source::read(std::path::Path::new(&path)) {
         Err(e) => println!("  FAILED: {e}"),
         Ok(document) => {
             let paragraphs: usize = document.pages.iter().map(|p| p.paragraphs.len()).sum();

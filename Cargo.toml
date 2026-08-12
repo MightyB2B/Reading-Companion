@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["crates/reading-core", "src-tauri"]
+
+# Shared so three crates cannot drift onto different versions of rusqlite or
+# reqwest, which would be a linking problem rather than a compile error.
+[workspace.dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+epub = "2.1.5"
+futures-util = "0.3.33"
+# Pure-Rust HEIC/HEIF decoder. Chosen over libheif-rs specifically to avoid a
+# C toolchain dependency in the Windows build. `parallel` matters here: an
+# iPhone page photo is ~12MP and tile decoding dominates import time.
+heic = { version = "0.1.6", features = ["parallel"] }
+image = "0.25.10"
+kamadak-exif = "0.6.1"
+pdf-extract = "0.12.0"
+# rustls rather than the default native-tls: Ollama may be plain HTTP, but a
+# remote server is HTTPS and rustls avoids a system TLS dependency entirely.
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls",
+    "charset",
+    "http2",
+] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+scraper = "0.27.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.0"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["full"] }
+
+reading-core = { path = "crates/reading-core" }

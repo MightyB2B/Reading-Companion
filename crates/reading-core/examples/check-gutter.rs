@@ -7,8 +7,8 @@
 //!
 //! Usage: cargo run --example check-gutter -- <image> [<image> ...]
 
-use book_companion_lib::ocr::orient;
-use book_companion_lib::ocr::preprocess::{decode_any, detect_gutter, split_at_gutter};
+use reading_core::ocr::orient;
+use reading_core::ocr::preprocess::{decode_any, detect_gutter, split_at_gutter};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -55,14 +55,14 @@ fn main() {
         print!("  upright : {w}x{h}  aspect {aspect:.2}  -> ");
 
         if let Some((gx, darkest, page, ratio, frac)) =
-            book_companion_lib::ocr::preprocess::gutter_diagnostics(&img)
+            reading_core::ocr::preprocess::gutter_diagnostics(&img)
         {
             println!(
                 "\n  gutter  : darkest {darkest:.0} at x={gx}, page {page:.0}, \
                  ratio {ratio:.3} (need <{:.2}), dark span {:.1}% (need <{:.0}%)",
-                book_companion_lib::ocr::preprocess::GUTTER_DARKNESS,
+                reading_core::ocr::preprocess::GUTTER_DARKNESS,
                 frac * 100.0,
-                book_companion_lib::ocr::preprocess::GUTTER_MAX_WIDTH_FRACTION * 100.0,
+                reading_core::ocr::preprocess::GUTTER_MAX_WIDTH_FRACTION * 100.0,
             );
         }
 

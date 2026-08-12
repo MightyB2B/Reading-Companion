@@ -12,6 +12,14 @@ dist
 dist-ssr
 *.local
 
+# Cargo build output. At the repository root since the workspace split: it
+# used to sit under src-tauri/ and be covered by that crate's own .gitignore,
+# which no longer reaches it.
+/target/
+
+# Database credentials, written by scripts/setup-postgres.ps1
+.env
+
 # Dictionary build: the 23MB Webster's source and the 40MB database it
 # produces are both regenerable with `node scripts/build-dictionary.mjs`.
 .cache

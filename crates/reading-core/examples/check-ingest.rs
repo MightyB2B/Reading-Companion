@@ -6,7 +6,7 @@
 //!
 //! Usage: cargo run --example check-ingest -- <file-or-url> [...]
 
-use book_companion_lib::ingest::{epub_source, html, pdf_source, Document, SourceKind};
+use reading_core::ingest::{epub_source, html, pdf_source, Document, SourceKind};
 
 #[tokio::main]
 async fn main() {

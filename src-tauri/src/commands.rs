@@ -10,20 +10,22 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::coach;
-use crate::db::{Db, SpineEntry};
-use crate::dict::{ContextualSense, Dictionary, Lookup};
-use crate::error::{AppError, Result};
-use crate::models::{Block, Book, Era, Page};
-use crate::ocr::segment::WordOracle;
-use crate::ocr::{self, preprocess};
-use crate::ollama::{
+use reading_core::coach;
+use reading_core::db::{Db, SpineEntry};
+use reading_core::dict::{ContextualSense, Dictionary, Lookup};
+use reading_core::error::{AppError, Result};
+use reading_core::models::{Block, Book, Era, Page};
+use reading_core::ocr::segment::WordOracle;
+use reading_core::ocr::{self, preprocess};
+use reading_core::ollama::{
     OcrOptions, OllamaClient, DEFAULT_OCR_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_VISION_MODEL,
 };
 
 pub struct AppState {
     pub db: Arc<Db>,
-    pub ollama: OllamaClient,
+    /// Behind a lock because the address is configurable: pointing the app at
+    /// a different machine replaces the client rather than restarting.
+    pub ollama: std::sync::RwLock<OllamaClient>,
     pub settings: std::sync::Mutex<Settings>,
     /// Where page images live.
     pub library_dir: PathBuf,
@@ -35,19 +37,90 @@ pub struct AppState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    /// Where Ollama is. Not necessarily this machine: inference can be
+    /// offloaded to a home server or a rented box with a real GPU, which for
+    /// a laptop with 8GB of VRAM is the difference between a 4B model and a
+    /// 30B one.
+    pub ollama_host: String,
+    /// Bearer token for a hosted server. Empty for a local Ollama, which
+    /// wants no authentication at all.
+    pub ollama_api_key: String,
     pub ocr_model: String,
     pub text_model: String,
     /// Reads the page number off the image when the transcription has none.
     pub vision_model: String,
+    /// How long the server holds a model after a request — "30m", "2h", or
+    /// "-1" to never unload. Sent with every call, because a value on the
+    /// request overrides the server's own `OLLAMA_KEEP_ALIVE`.
+    pub keep_alive: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            ollama_host: reading_core::ollama::DEFAULT_HOST.to_string(),
+            ollama_api_key: String::new(),
             ocr_model: DEFAULT_OCR_MODEL.to_string(),
             text_model: DEFAULT_TEXT_MODEL.to_string(),
             vision_model: DEFAULT_VISION_MODEL.to_string(),
+            keep_alive: reading_core::ollama::DEFAULT_KEEP_ALIVE.to_string(),
         }
+    }
+}
+
+impl Settings {
+    /// Read from the database, falling back to the defaults for anything
+    /// unset — which is every key on a fresh install.
+    pub fn load(db: &Db) -> Self {
+        let mut settings = Settings::default();
+        let get = |key: &str| db.get_setting(key).ok().flatten();
+
+        if let Some(v) = get("ollama_host") {
+            settings.ollama_host = v;
+        }
+        if let Some(v) = get("ollama_api_key") {
+            settings.ollama_api_key = v;
+        }
+        if let Some(v) = get("ocr_model") {
+            settings.ocr_model = v;
+        }
+        if let Some(v) = get("text_model") {
+            settings.text_model = v;
+        }
+        if let Some(v) = get("vision_model") {
+            settings.vision_model = v;
+        }
+        if let Some(v) = get("keep_alive") {
+            settings.keep_alive = v;
+        }
+        settings
+    }
+
+    pub fn save(&self, db: &Db) -> Result<()> {
+        db.set_setting("ollama_host", &self.ollama_host)?;
+        db.set_setting("ollama_api_key", &self.ollama_api_key)?;
+        db.set_setting("ocr_model", &self.ocr_model)?;
+        db.set_setting("text_model", &self.text_model)?;
+        db.set_setting("vision_model", &self.vision_model)?;
+        db.set_setting("keep_alive", &self.keep_alive)?;
+        Ok(())
+    }
+
+    /// Tidy an address typed by a person.
+    ///
+    /// `192.168.1.50:11434` and `http://192.168.1.50:11434/` should both work;
+    /// requiring the scheme and forbidding a trailing slash would be a
+    /// pointless way to fail.
+    pub fn normalise_host(input: &str) -> String {
+        let trimmed = input.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            return reading_core::ollama::DEFAULT_HOST.to_string();
+        }
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            return trimmed.to_string();
+        }
+        // A bare host or host:port means plain HTTP, as Ollama serves.
+        format!("http://{trimmed}")
     }
 }
 
@@ -55,6 +128,15 @@ impl AppState {
     fn settings(&self) -> Settings {
         self.settings
             .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// A snapshot of the client. Cloning is cheap — `reqwest::Client` is an
+    /// Arc internally — and it avoids holding the lock across an await.
+    fn ollama(&self) -> OllamaClient {
+        self.ollama
+            .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
@@ -74,7 +156,7 @@ pub struct OllamaStatus {
 #[tauri::command]
 pub async fn check_ollama(state: State<'_, AppState>) -> Result<OllamaStatus> {
     let settings = state.settings();
-    match state.ollama.health().await {
+    match state.ollama().health().await {
         Ok(models) => {
             let has = |want: &str| {
                 models
@@ -112,8 +194,125 @@ pub async fn check_ollama(state: State<'_, AppState>) -> Result<OllamaStatus> {
             models: Vec::new(),
             ocr_model_ready: false,
             text_model_ready: false,
-            message: e.to_string(),
+            message: auth_hint(&e).unwrap_or_else(|| e.to_string()),
         }),
+    }
+}
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
+    Ok(state.settings())
+}
+
+/// The defaults, so the settings window can offer to restore them.
+#[tauri::command]
+pub fn default_settings() -> Settings {
+    Settings::default()
+}
+
+/// Save settings, rebuilding the Ollama client if the server changed.
+///
+/// Pointing the app at another machine takes effect immediately — the client
+/// is replaced rather than the app restarted, so a reader can move inference
+/// to a home server and carry on reading.
+#[tauri::command]
+pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
+    let cleaned = Settings {
+        ollama_host: Settings::normalise_host(&settings.ollama_host),
+        ollama_api_key: settings.ollama_api_key.trim().to_string(),
+        ocr_model: non_empty(&settings.ocr_model, DEFAULT_OCR_MODEL),
+        text_model: non_empty(&settings.text_model, DEFAULT_TEXT_MODEL),
+        vision_model: non_empty(&settings.vision_model, DEFAULT_VISION_MODEL),
+        keep_alive: non_empty(&settings.keep_alive, reading_core::ollama::DEFAULT_KEEP_ALIVE),
+    };
+    cleaned.save(&state.db)?;
+
+    let previous = state.settings();
+    // Key and keep-alive are both baked into the client, so any of the three
+    // changing means it has to be rebuilt.
+    let server_changed = previous.ollama_host != cleaned.ollama_host
+        || previous.ollama_api_key != cleaned.ollama_api_key
+        || previous.keep_alive != cleaned.keep_alive;
+    *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = cleaned.clone();
+
+    if server_changed {
+        *state.ollama.write().unwrap_or_else(|e| e.into_inner()) =
+            OllamaClient::new(cleaned.ollama_host.clone(), Some(&cleaned.ollama_api_key))
+                .with_keep_alive(&cleaned.keep_alive);
+    }
+    Ok(cleaned)
+}
+
+/// The models installed on a server, for choosing between rather than typing.
+///
+/// Takes the address and key rather than using the saved ones, so the settings
+/// window can list what is on a machine the reader has typed but not yet
+/// committed to. Falls back to the configured server when no address is given.
+#[tauri::command]
+pub async fn list_models(
+    state: State<'_, AppState>,
+    host: Option<String>,
+    api_key: Option<String>,
+) -> Result<Vec<reading_core::ollama::ModelInfo>> {
+    let client = match host {
+        Some(h) if !h.trim().is_empty() => {
+            OllamaClient::new(Settings::normalise_host(&h), api_key.as_deref())
+        }
+        _ => state.ollama(),
+    };
+    client.installed_models().await
+}
+
+/// Try a server without committing to it, so the settings window can say
+/// whether it is really there before the reader saves.
+#[tauri::command]
+pub async fn test_ollama_host(host: String, api_key: Option<String>) -> Result<OllamaStatus> {
+    let host = Settings::normalise_host(&host);
+    let client = OllamaClient::new(host.clone(), api_key.as_deref());
+
+    Ok(match client.health().await {
+        Ok(models) => OllamaStatus {
+            message: format!("Reached {host} — {} models installed.", models.len()),
+            reachable: true,
+            ocr_model_ready: true,
+            text_model_ready: true,
+            models,
+        },
+        Err(e) => OllamaStatus {
+            reachable: false,
+            models: Vec::new(),
+            ocr_model_ready: false,
+            text_model_ready: false,
+            message: auth_hint(&e).unwrap_or_else(|| e.to_string()),
+        },
+    })
+}
+
+/// Say what a rejected request actually means.
+///
+/// The server is plainly reachable when it answers 401 or 403, so reporting it
+/// as unreachable would send the reader to check their network when the
+/// problem is the key.
+fn auth_hint(e: &reading_core::error::AppError) -> Option<String> {
+    match e {
+        reading_core::error::AppError::OllamaStatus { status: 401, .. } => Some(
+            "The server answered, but rejected the API key. Check the key, or clear it if the server does not want one."
+                .to_string(),
+        ),
+        reading_core::error::AppError::OllamaStatus { status: 403, .. } => Some(
+            "The server answered, but refused this key. It may lack access to the models, or have expired."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+fn non_empty(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -139,7 +338,7 @@ pub fn create_book(
 
 /// What a book contains, so a deletion prompt can say what it costs.
 #[tauri::command]
-pub fn book_stats(state: State<'_, AppState>, book_id: i64) -> Result<crate::db::BookStats> {
+pub fn book_stats(state: State<'_, AppState>, book_id: i64) -> Result<reading_core::db::BookStats> {
     state.db.book_stats(book_id)
 }
 
@@ -399,7 +598,7 @@ pub async fn import_document(
     book_id: i64,
     source: String,
 ) -> Result<DocumentImport> {
-    use crate::ingest::{html, SourceKind};
+    use reading_core::ingest::{html, SourceKind};
 
     let kind = SourceKind::from_source(&source);
     if kind == SourceKind::Photo {
@@ -423,8 +622,8 @@ pub async fn import_document(
         _ => {
             let path = std::path::PathBuf::from(&source);
             tauri::async_runtime::spawn_blocking(move || match kind {
-                SourceKind::Epub => crate::ingest::epub_source::read(&path),
-                SourceKind::Pdf => crate::ingest::pdf_source::read(&path),
+                SourceKind::Epub => reading_core::ingest::epub_source::read(&path),
+                SourceKind::Pdf => reading_core::ingest::pdf_source::read(&path),
                 _ => unreachable!("photo and web handled above"),
             })
             .await
@@ -453,8 +652,8 @@ pub async fn import_document(
         if let Some(label) = &page.label {
             blocks.insert(
                 0,
-                crate::models::DraftBlock {
-                    kind: crate::models::BlockKind::Heading,
+                reading_core::models::DraftBlock {
+                    kind: reading_core::models::BlockKind::Heading,
                     text_raw: label.clone(),
                     text_norm: label.clone(),
                 },
@@ -495,8 +694,8 @@ pub async fn import_document(
     })
 }
 
-fn describe(kind: crate::ingest::SourceKind) -> &'static str {
-    use crate::ingest::SourceKind::*;
+fn describe(kind: reading_core::ingest::SourceKind) -> &'static str {
+    use reading_core::ingest::SourceKind::*;
     match kind {
         Epub => "Opening the ebook",
         Pdf => "Reading the PDF",
@@ -517,6 +716,7 @@ pub async fn run_ocr(
     book_id: i64,
 ) -> Result<Vec<Block>> {
     let settings = state.settings();
+    let client = state.ollama();
     let book = state.db.get_book(book_id)?;
     let era = Era::from_str_lossy(&book.era);
 
@@ -536,8 +736,7 @@ pub async fn run_ocr(
     state.db.set_page_status(page_id, "running", None)?;
     emit_progress(&app, "transcribing", "Reading the page", 1, 3);
 
-    let raw = state
-        .ollama
+    let raw = client
         .ocr(
             &settings.ocr_model,
             image,
@@ -571,9 +770,8 @@ pub async fn run_ocr(
         if !ocr::legible::reads_as_language(&raw, dict) {
             emit_progress(&app, "transcribing", "That came out garbled — turning the page over", 1, 3);
 
-            if let Ok(turned) = turn_page_over(&image_path) {
-                let retry = state
-                    .ollama
+            if let Ok(turned) = preprocess::turn_page_over(&image_path) {
+                let retry = client
                     .ocr(&settings.ocr_model, turned, &OcrOptions::default(), |chunk| {
                         let _ = app.emit(
                             "ocr-progress",
@@ -604,7 +802,7 @@ pub async fn run_ocr(
     // number after it is wrong.
     emit_progress(&app, "numbering", "Finding the page number", 2, 3);
     let (page_no, source) = ocr::page_number::detect(
-        &state.ollama,
+        &client,
         &settings.text_model,
         &settings.vision_model,
         &raw,
@@ -704,6 +902,7 @@ pub async fn critique_summary(
     let summary_id = state.db.save_summary(block_id, None, &sentence, self_checked)?;
 
     let settings = state.settings();
+    let client = state.ollama();
     let era = era_for_block(&state, &block)?;
 
     // Judge the summary against the whole paragraph, including the part that
@@ -712,7 +911,7 @@ pub async fn critique_summary(
     let paragraph = build_paragraph_context(&state, block_id)?;
 
     let assessment = coach::critique(
-        &state.ollama,
+        &client,
         &settings.text_model,
         &paragraph.text,
         &sentence,
@@ -742,8 +941,9 @@ pub async fn get_exemplar(state: State<'_, AppState>, block_id: i64) -> Result<c
     let block = state.db.get_block(block_id)?;
     let era = era_for_block(&state, &block)?;
     let settings = state.settings();
+    let client = state.ollama();
     let paragraph = build_paragraph_context(&state, block_id)?;
-    coach::exemplar(&state.ollama, &settings.text_model, &paragraph.text, era).await
+    coach::exemplar(&client, &settings.text_model, &paragraph.text, era).await
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -776,7 +976,7 @@ pub struct OutlinePage {
 /// furniture.
 #[tauri::command]
 pub fn book_outline(state: State<'_, AppState>, book_id: i64) -> Result<Vec<OutlinePage>> {
-    use crate::ocr::outline::{fold_titles, heading_level, preview, Heading, HeadingLevel};
+    use reading_core::ocr::outline::{fold_titles, heading_level, preview, Heading, HeadingLevel};
 
     let pages = state.db.list_pages(book_id)?;
     let mut out = Vec::with_capacity(pages.len());
@@ -822,7 +1022,7 @@ pub fn book_outline(state: State<'_, AppState>, book_id: i64) -> Result<Vec<Outl
         })
         .collect();
 
-        let paragraphs: Vec<&crate::models::Block> =
+        let paragraphs: Vec<&reading_core::models::Block> =
             blocks.iter().filter(|b| b.kind == "paragraph").collect();
 
         let summarised = paragraphs
@@ -901,8 +1101,9 @@ pub async fn word_in_context(
         .ok_or_else(|| AppError::NotFound(format!("\"{word}\" is not in the dictionary")))?;
 
     let settings = state.settings();
-    let in_context = crate::dict::sense_in_context(
-        &state.ollama,
+    let client = state.ollama();
+    let in_context = reading_core::dict::sense_in_context(
+        &client,
         &settings.text_model,
         &lookup.lemma,
         &sentence,
@@ -933,7 +1134,7 @@ pub async fn word_in_context(
 }
 
 #[tauri::command]
-pub fn vocabulary(state: State<'_, AppState>, book_id: i64) -> Result<Vec<crate::db::VocabEntry>> {
+pub fn vocabulary(state: State<'_, AppState>, book_id: i64) -> Result<Vec<reading_core::db::VocabEntry>> {
     state.db.vocabulary(book_id)
 }
 
@@ -1012,7 +1213,7 @@ fn build_paragraph_context(
     state: &State<'_, AppState>,
     block_id: i64,
 ) -> Result<ParagraphContext> {
-    use crate::ocr::segment::{ends_mid_sentence, starts_mid_sentence, stitch_across_pages};
+    use reading_core::ocr::segment::{ends_mid_sentence, starts_mid_sentence, stitch_across_pages};
 
     let block = state.db.get_block(block_id)?;
     let oracle = state.dict.as_deref().map(|d| d as &dyn WordOracle);
@@ -1103,21 +1304,103 @@ fn source_for(page_no: Option<i64>) -> &'static str {
     }
 }
 
-/// Re-encode a page image rotated 180°, for the legibility retry.
-fn turn_page_over(path: &str) -> Result<Vec<u8>> {
-    let bytes = std::fs::read(path)?;
-    let flipped = preprocess::decode_any(&bytes)?.rotate180();
-
-    let mut out = std::io::Cursor::new(Vec::new());
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
-    encoder.encode_image(&flipped)?;
-    Ok(out.into_inner())
-}
-
 fn era_for_block(state: &State<'_, AppState>, block: &Block) -> Result<Era> {
     let book_id = state.db.book_id_for_page(block.page_id)?;
     let book = state.db.get_book(book_id)?;
     Ok(Era::from_str_lossy(&book.era))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A person typing a server address should not have to know the scheme,
+    /// and should not be punished for a trailing slash.
+    #[test]
+    fn an_address_typed_by_a_person_is_accepted() {
+        let http = "http://192.168.1.50:11434";
+        assert_eq!(Settings::normalise_host("192.168.1.50:11434"), http);
+        assert_eq!(Settings::normalise_host("  192.168.1.50:11434/  "), http);
+        assert_eq!(Settings::normalise_host(http), http);
+        assert_eq!(Settings::normalise_host("http://192.168.1.50:11434/"), http);
+    }
+
+    #[test]
+    fn https_is_left_alone() {
+        // A tunnelled or hosted endpoint must keep its scheme.
+        let url = "https://ollama.example.com";
+        assert_eq!(Settings::normalise_host(url), url);
+    }
+
+    #[test]
+    fn an_empty_address_falls_back_to_this_machine() {
+        assert_eq!(
+            Settings::normalise_host("   "),
+            reading_core::ollama::DEFAULT_HOST
+        );
+    }
+
+    #[test]
+    fn a_blank_model_name_falls_back_rather_than_breaking_inference() {
+        assert_eq!(non_empty("  ", DEFAULT_TEXT_MODEL), DEFAULT_TEXT_MODEL);
+        assert_eq!(non_empty(" llama3 ", DEFAULT_TEXT_MODEL), "llama3");
+    }
+
+    #[test]
+    fn settings_survive_a_round_trip_through_the_database() {
+        let db = Db::open_in_memory().unwrap();
+        let settings = Settings {
+            ollama_host: "http://desktop.local:11434".into(),
+            ollama_api_key: "sk-abc123".into(),
+            ocr_model: "glm-ocr".into(),
+            text_model: "qwen3:30b".into(),
+            vision_model: "qwen3-vl:8b".into(),
+            keep_alive: "-1".into(),
+        };
+        settings.save(&db).unwrap();
+
+        let loaded = Settings::load(&db);
+        assert_eq!(loaded.ollama_host, "http://desktop.local:11434");
+        assert_eq!(loaded.text_model, "qwen3:30b");
+        assert_eq!(loaded.ollama_api_key, "sk-abc123");
+        assert_eq!(loaded.keep_alive, "-1");
+    }
+
+    /// Blank must not reach Ollama: it reads an empty keep_alive as zero and
+    /// unloads the model the instant the request finishes, which would turn
+    /// every page into a cold load.
+    #[test]
+    fn a_blank_keep_alive_falls_back_to_the_default() {
+        let client = reading_core::ollama::OllamaClient::new("http://127.0.0.1:11434", None)
+            .with_keep_alive("   ");
+        assert_eq!(client.keep_alive(), reading_core::ollama::DEFAULT_KEEP_ALIVE);
+
+        let pinned =
+            reading_core::ollama::OllamaClient::new("http://127.0.0.1:11434", None).with_keep_alive("-1");
+        assert_eq!(pinned.keep_alive(), "-1");
+    }
+
+    /// A local install has no key, and must not end up sending an empty
+    /// bearer token — some proxies reject that outright.
+    #[test]
+    fn a_blank_api_key_is_no_key_at_all() {
+        assert!(Settings::default().ollama_api_key.is_empty());
+        // Construction must not panic on any of these.
+        reading_core::ollama::OllamaClient::new("http://127.0.0.1:11434", None);
+        reading_core::ollama::OllamaClient::new("http://127.0.0.1:11434", Some(""));
+        reading_core::ollama::OllamaClient::new("http://127.0.0.1:11434", Some("   "));
+        reading_core::ollama::OllamaClient::new("http://127.0.0.1:11434", Some("sk-abc123"));
+        // A key that cannot be a header value is dropped, not fatal.
+        reading_core::ollama::OllamaClient::new("http://127.0.0.1:11434", Some("bad\nkey"));
+    }
+
+    #[test]
+    fn an_unset_database_yields_the_defaults() {
+        let db = Db::open_in_memory().unwrap();
+        let loaded = Settings::load(&db);
+        assert_eq!(loaded.ollama_host, reading_core::ollama::DEFAULT_HOST);
+        assert_eq!(loaded.ocr_model, DEFAULT_OCR_MODEL);
+    }
 }
 
 /// Build the application state, creating the library directory on first run.
@@ -1132,6 +1415,7 @@ pub fn init_state(app: &AppHandle) -> Result<AppState> {
     std::fs::create_dir_all(&library_dir)?;
 
     let db = Db::open(data_dir.join("library.sqlite"))?;
+    let settings = Settings::load(&db);
 
     // Bundled as a Tauri resource. Missing it degrades the app rather than
     // stopping it, so a checkout that has not run the build script still runs.
@@ -1149,8 +1433,11 @@ pub fn init_state(app: &AppHandle) -> Result<AppState> {
 
     Ok(AppState {
         db: Arc::new(db),
-        ollama: OllamaClient::default(),
-        settings: std::sync::Mutex::new(Settings::default()),
+        ollama: std::sync::RwLock::new(
+            OllamaClient::new(settings.ollama_host.clone(), Some(&settings.ollama_api_key))
+                .with_keep_alive(&settings.keep_alive),
+        ),
+        settings: std::sync::Mutex::new(settings),
         library_dir,
         dict,
     })

@@ -25,21 +25,42 @@ pub const DEFAULT_TEXT_MODEL: &str = "qwen3:4b";
 /// a second.
 pub const DEFAULT_VISION_MODEL: &str = "qwen3-vl:4b";
 
-/// Short, because this model is a third resident alongside `glm-ocr` and
-/// `qwen3:4b`, and all three together exceed 8GB of VRAM. Long enough that a
-/// burst of page imports reuses one load; short enough that the memory comes
-/// back once the reader stops importing.
-pub const VISION_KEEP_ALIVE: &str = "3m";
+/// How long an idle model stays loaded, sent with every request.
+///
+/// Long enough that switching between transcribing a page and critiquing a
+/// summary never pays a model reload; short enough that a laptop gets its VRAM
+/// back after a reading session. With glm-ocr at 2.2GB and qwen3:4b at 2.5GB
+/// both stay resident inside 8GB with room for context.
+///
+/// A dedicated server has nothing to give the memory back to, so this is a
+/// setting: `-1` pins models indefinitely. Ollama's own `OLLAMA_KEEP_ALIVE`
+/// cannot do that job, because a value sent on the request wins over it.
+pub const DEFAULT_KEEP_ALIVE: &str = "30m";
 
-/// Keeps both models resident between calls so switching between transcribing
-/// a page and critiquing a summary never pays a model reload. With glm-ocr at
-/// 2.2GB and qwen3:4b at 2.5GB this fits inside 8GB of VRAM with room for
-/// context.
-pub const KEEP_ALIVE: &str = "30m";
+/// A model installed on the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub name: String,
+    pub size_bytes: u64,
+    /// e.g. "4.0B". Empty when the server does not report it.
+    pub parameter_size: String,
+    /// e.g. "Q4_K_M".
+    pub quantization: String,
+    /// e.g. ["vision", "completion", "tools", "thinking"].
+    pub capabilities: Vec<String>,
+}
+
+impl ModelInfo {
+    /// Can this model be shown an image?
+    pub fn sees_images(&self) -> bool {
+        self.capabilities.iter().any(|c| c == "vision")
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OllamaClient {
     host: String,
+    keep_alive: String,
     http: reqwest::Client,
 }
 
@@ -116,10 +137,32 @@ page, simply stop.
 - No commentary, no code fences.";
 
 impl OllamaClient {
-    pub fn new(host: impl Into<String>) -> Self {
+    /// `api_key` is for hosted Ollama-compatible servers, which authenticate
+    /// with a bearer token. A local install needs none, so it is optional.
+    ///
+    /// The key is attached as a default header rather than per request: every
+    /// endpoint this client touches needs it, and a call site that forgot
+    /// would fail with a 401 that reads like a wrong key rather than a
+    /// missing one.
+    pub fn new(host: impl Into<String>, api_key: Option<&str>) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
+            // A key with a stray newline or non-ASCII character cannot go in a
+            // header at all. Dropping it gives an honest 401 instead of every
+            // request failing to build for reasons the reader cannot see.
+            if let Ok(mut value) =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
+            {
+                value.set_sensitive(true);
+                headers.insert(reqwest::header::AUTHORIZATION, value);
+            }
+        }
+
         Self {
             host: host.into(),
+            keep_alive: DEFAULT_KEEP_ALIVE.to_string(),
             http: reqwest::Client::builder()
+                .default_headers(headers)
                 // Generous, because a cold model load can take ~50s. The real
                 // protection against a runaway is num_predict, not this.
                 .timeout(std::time::Duration::from_secs(300))
@@ -128,13 +171,44 @@ impl OllamaClient {
         }
     }
 
+    /// How long the server should hold a model after this client's requests.
+    /// Blank falls back to the default rather than sending an empty string,
+    /// which Ollama reads as zero and unloads immediately.
+    pub fn with_keep_alive(mut self, keep_alive: &str) -> Self {
+        let trimmed = keep_alive.trim();
+        if !trimmed.is_empty() {
+            self.keep_alive = trimmed.to_string();
+        }
+        self
+    }
+
     pub fn host(&self) -> &str {
         &self.host
+    }
+
+    pub fn keep_alive(&self) -> &str {
+        &self.keep_alive
     }
 
     /// Is Ollama up? Used at startup to give a clear message rather than
     /// letting the first real call fail confusingly.
     pub async fn health(&self) -> Result<Vec<String>> {
+        Ok(self
+            .installed_models()
+            .await?
+            .into_iter()
+            .map(|m| m.name)
+            .collect())
+    }
+
+    /// Every model installed on the server, with enough detail to choose
+    /// between them.
+    ///
+    /// `capabilities` is the field that matters: it says outright whether a
+    /// model can see an image. Transcribing a page with a text-only model
+    /// fails in a way that looks like a bug in this application rather than a
+    /// wrong choice, so the settings window filters by it.
+    pub async fn installed_models(&self) -> Result<Vec<ModelInfo>> {
         let url = format!("{}/api/tags", self.host);
         let resp = self
             .http
@@ -146,6 +220,12 @@ impl OllamaClient {
                 source,
             })?;
 
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::OllamaStatus { status, body });
+        }
+
         #[derive(Deserialize)]
         struct Tags {
             models: Vec<Model>,
@@ -153,10 +233,36 @@ impl OllamaClient {
         #[derive(Deserialize)]
         struct Model {
             name: String,
+            #[serde(default)]
+            size: u64,
+            #[serde(default)]
+            details: Details,
+            #[serde(default)]
+            capabilities: Vec<String>,
+        }
+        #[derive(Deserialize, Default)]
+        struct Details {
+            #[serde(default)]
+            parameter_size: String,
+            #[serde(default)]
+            quantization_level: String,
         }
 
         let tags: Tags = resp.json().await?;
-        Ok(tags.models.into_iter().map(|m| m.name).collect())
+        let mut models: Vec<ModelInfo> = tags
+            .models
+            .into_iter()
+            .map(|m| ModelInfo {
+                name: m.name,
+                size_bytes: m.size,
+                parameter_size: m.details.parameter_size,
+                quantization: m.details.quantization_level,
+                capabilities: m.capabilities,
+            })
+            .collect();
+
+        models.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(models)
     }
 
     /// Streaming generate. `on_chunk` receives text as it arrives so the UI can
@@ -184,7 +290,7 @@ impl OllamaClient {
             system,
             images: encoded,
             stream: true,
-            keep_alive: KEEP_ALIVE,
+            keep_alive: &self.keep_alive,
             think: None,
             format: None,
             options,
@@ -264,11 +370,6 @@ impl OllamaClient {
             .await
     }
 
-    /// Generate a value conforming to a JSON schema.
-    ///
-    /// The schema is enforced by Ollama's `format` parameter, which is what
-    /// makes the Socratic contract structural: if the schema has no field for
-    /// a model-written summary, a well-formed response cannot contain one.
     /// Ask a vision model a short question about an image.
     ///
     /// Deliberately capped at a handful of tokens: the only question asked
@@ -279,7 +380,6 @@ impl OllamaClient {
         model: &str,
         prompt: &str,
         image: Vec<u8>,
-        keep_alive: &str,
     ) -> Result<String> {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&image);
         let req = GenerateRequest {
@@ -288,7 +388,7 @@ impl OllamaClient {
             system: None,
             images: vec![encoded],
             stream: false,
-            keep_alive,
+            keep_alive: &self.keep_alive,
             think: Some(false),
             format: None,
             options: serde_json::json!({
@@ -364,7 +464,7 @@ impl OllamaClient {
             system: Some(system),
             images: Vec::new(),
             stream: false,
-            keep_alive: KEEP_ALIVE,
+            keep_alive: &self.keep_alive,
             think: Some(false),
             format: Some(schema),
             options: serde_json::json!({
@@ -425,7 +525,7 @@ fn truncate(s: &str, n: usize) -> String {
 
 impl Default for OllamaClient {
     fn default() -> Self {
-        Self::new(DEFAULT_HOST)
+        Self::new(DEFAULT_HOST, None)
     }
 }
 

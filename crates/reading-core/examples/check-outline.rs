@@ -6,8 +6,8 @@
 //!
 //! Usage: cargo run --example check-outline -- <path-to-library.sqlite>
 
-use book_companion_lib::db::Db;
-use book_companion_lib::ocr::outline::{fold_titles, heading_level, Heading, HeadingLevel};
+use reading_core::db::Db;
+use reading_core::ocr::outline::{fold_titles, heading_level, Heading, HeadingLevel};
 
 fn main() {
     let Some(path) = std::env::args().nth(1) else {

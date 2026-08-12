@@ -110,7 +110,12 @@ export function AddContentWizard({
 
   return (
     <div
-      className="veil-in fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 backdrop-blur-[2px]"
+      // No backdrop-blur here. A blur over a full-viewport overlay is
+      // recomputed by the compositor whenever anything above it repaints, and
+      // the spinner repaints every frame — so a 2px blur nobody can see costs
+      // a continuously busy GPU for the whole length of an import. The dim
+      // alone reads the same.
+      className="veil-in fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
       onClick={() => step !== "working" && onClose()}
     >
       <div

@@ -1,12 +1,9 @@
-pub mod coach;
+//! The desktop application.
+//!
+//! A thin shell: every command here translates an IPC call into a call on
+//! `reading-core`, which holds all the actual behaviour.
+
 pub mod commands;
-pub mod db;
-pub mod dict;
-pub mod error;
-pub mod ingest;
-pub mod models;
-pub mod ocr;
-pub mod ollama;
 
 use tauri::Manager;
 
@@ -24,6 +21,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::check_ollama,
+            commands::get_settings,
+            commands::default_settings,
+            commands::save_settings,
+            commands::test_ollama_host,
+            commands::list_models,
             commands::list_books,
             commands::create_book,
             commands::book_stats,

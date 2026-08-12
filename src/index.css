@@ -136,129 +136,195 @@ body {
 }
 
 /* ---- page turn ----------------------------------------------------------
-   A leaf hinged at the spine: the free edge lifts, sweeps across, and the
-   next page is revealed beneath it.
+   A real leaf: a sheet of paper with two sides, hinged at the spine, that
+   lifts, sweeps over, and lands face down while the next page is revealed
+   beneath it.
 
-   turn.js does this more elaborately, but it wants jQuery, a non-commercial
-   licence, and every page present as a fixed-size sibling div. This pane is a
-   scrollable variable-height column that loads one page at a time from SQLite,
-   so the geometry it assumes does not hold. The effect below is the part worth
-   having.
+   The earlier version rotated the whole pane a few degrees and faded it. That
+   reads as a swinging door rather than paper, for three reasons, all fixed
+   here: a sheet has a *back*, which you see for the second half of the turn;
+   it rotates a full 180° rather than peeking; and it casts a moving shadow on
+   what it uncovers.
 
-   The perspective lives on the stage, not the leaf, so the vanishing point
-   stays put while the leaf rotates — putting it on the element itself is what
-   makes a CSS page turn look like a flat swinging door. */
+   StPageFlip (MIT, and genuinely good) was evaluated instead. It clones the
+   page elements into its own wrapper, which would leave the reader looking at
+   a copy — no click-to-focus, no word selection, no inline correction. So the
+   live page stays live and only a snapshot of the outgoing page is animated.
+
+   Perspective lives on the stage, never on the leaf: on the leaf, each face
+   gets its own vanishing point and the sheet visibly bends. */
 
 .page-stage {
-  perspective: 2200px;
-  perspective-origin: left center;
+  perspective: 2400px;
+  perspective-origin: 50% 50%;
+
+  /* Shading strengths, gathered here because they are the only part of this
+     worth tuning by eye. Paper shading is a depth cue, not a light source —
+     the first pass peaked at 0.75 and read as a glow sweeping the page. */
+  --leaf-sheen-ink: 14%;
+  --leaf-sheen-peak: 0.32;
+  --leaf-cast-ink: 32%;
+  --leaf-cast-peak: 0.42;
 }
 
-/* Forward: hinged at the spine on the left, the right edge lifts away. */
-@keyframes leaf-away-forward {
-  from {
-    transform: rotateY(0deg);
-    opacity: 1;
-  }
-  to {
-    transform: rotateY(-82deg);
-    opacity: 0;
-  }
-}
-
-@keyframes leaf-settle-forward {
-  from {
-    transform: rotateY(24deg);
-    opacity: 0;
-  }
-  to {
-    transform: rotateY(0deg);
-    opacity: 1;
-  }
-}
-
-/* Back: mirrored, hinged on the right. */
-@keyframes leaf-away-back {
-  from {
-    transform: rotateY(0deg);
-    opacity: 1;
-  }
-  to {
-    transform: rotateY(82deg);
-    opacity: 0;
-  }
-}
-
-@keyframes leaf-settle-back {
-  from {
-    transform: rotateY(-24deg);
-    opacity: 0;
-  }
-  to {
-    transform: rotateY(0deg);
-    opacity: 1;
-  }
-}
-
-.leaf-away-forward {
-  animation: leaf-away-forward 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
-  transform-origin: left center;
-  backface-visibility: hidden;
-}
-
-.leaf-settle-forward {
-  animation: leaf-settle-forward 240ms cubic-bezier(0, 0, 0.2, 1);
-  transform-origin: left center;
-  backface-visibility: hidden;
-}
-
-.leaf-away-back {
-  animation: leaf-away-back 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
-  transform-origin: right center;
-  backface-visibility: hidden;
-}
-
-.leaf-settle-back {
-  animation: leaf-settle-back 240ms cubic-bezier(0, 0, 0.2, 1);
-  transform-origin: right center;
-  backface-visibility: hidden;
-}
-
-/* The shadow the lifting leaf casts back onto the page beneath. Without it the
-   turn reads as a flat rotation rather than a sheet of paper with a near and a
-   far edge. */
-.leaf-shadow {
+.leaf {
   position: absolute;
   inset: 0;
+  z-index: 20;
+  transform-style: preserve-3d;
   pointer-events: none;
-  z-index: 5;
-  animation: leaf-shadow 440ms ease-in-out;
+  will-change: transform;
 }
 
-@keyframes leaf-shadow {
+/* Hinged at the spine. Forward turns pivot on the left edge, back turns on
+   the right, which is what makes the two directions feel different rather
+   than merely reversed. */
+.leaf-forward {
+  transform-origin: left center;
+  animation: leaf-turn-forward var(--leaf-duration, 620ms)
+    cubic-bezier(0.36, 0.05, 0.28, 1) forwards;
+}
+
+.leaf-back {
+  transform-origin: right center;
+  animation: leaf-turn-back var(--leaf-duration, 620ms)
+    cubic-bezier(0.36, 0.05, 0.28, 1) forwards;
+}
+
+@keyframes leaf-turn-forward {
+  from {
+    transform: rotateY(0deg);
+  }
+  to {
+    transform: rotateY(-180deg);
+  }
+}
+
+@keyframes leaf-turn-back {
+  from {
+    transform: rotateY(0deg);
+  }
+  to {
+    transform: rotateY(180deg);
+  }
+}
+
+.leaf-face {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  backface-visibility: hidden;
+  background: var(--color-paper);
+  border: 1px solid var(--color-rule);
+}
+
+/* The reverse of the sheet. Turned to face the other way, so it appears
+   exactly as the leaf passes vertical. */
+.leaf-face-back {
+  transform: rotateY(180deg);
+}
+
+/* Paper is not transparent, but it is thin: the far side of a page carries a
+   faint ghost of its own printing and the light falling across it. */
+.leaf-face-back::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to left,
+    color-mix(in oklab, var(--color-ink) 10%, transparent),
+    transparent 55%
+  );
+}
+
+/* Shading across the leaf itself, so the sheet reads as curved rather than
+   as a flat plane pivoting. Strongest at the hinge, where a real page bends
+   most sharply. */
+.leaf-face::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  animation: leaf-sheen var(--leaf-duration, 620ms) ease-in-out forwards;
+}
+
+.leaf-forward .leaf-face::before {
+  background: linear-gradient(
+    to right,
+    color-mix(in oklab, var(--color-ink) var(--leaf-sheen-ink), transparent),
+    transparent 26%
+  );
+}
+
+.leaf-back .leaf-face::before {
+  background: linear-gradient(
+    to left,
+    color-mix(in oklab, var(--color-ink) var(--leaf-sheen-ink), transparent),
+    transparent 26%
+  );
+}
+
+@keyframes leaf-sheen {
+  0%,
+  100% {
+    opacity: 0.08;
+  }
+  50% {
+    opacity: var(--leaf-sheen-peak);
+  }
+}
+
+/* The shadow the lifting leaf throws across the page it uncovers. Peaks as
+   the leaf stands vertical and is gone by the time it lands. */
+.leaf-cast-shadow {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+  animation: leaf-cast var(--leaf-duration, 620ms) ease-in-out forwards;
+}
+
+.leaf-cast-forward {
+  background: linear-gradient(
+    to right,
+    color-mix(in oklab, var(--color-ink) var(--leaf-cast-ink), transparent),
+    transparent 55%
+  );
+}
+
+.leaf-cast-back {
+  background: linear-gradient(
+    to left,
+    color-mix(in oklab, var(--color-ink) var(--leaf-cast-ink), transparent),
+    transparent 55%
+  );
+}
+
+@keyframes leaf-cast {
   0%,
   100% {
     opacity: 0;
   }
   45% {
-    opacity: 0.55;
+    opacity: var(--leaf-cast-peak);
   }
 }
 
-.leaf-shadow-forward {
-  background: linear-gradient(
-    to right,
-    color-mix(in oklab, var(--color-ink) 42%, transparent) 0%,
-    transparent 45%
-  );
+/* The page being uncovered settles the last of the way, so it does not simply
+   appear the instant the leaf clears it. */
+.page-settling {
+  animation: page-settle var(--leaf-duration, 620ms) ease-out;
 }
 
-.leaf-shadow-back {
-  background: linear-gradient(
-    to left,
-    color-mix(in oklab, var(--color-ink) 42%, transparent) 0%,
-    transparent 45%
-  );
+@keyframes page-settle {
+  0%,
+  40% {
+    opacity: 0.55;
+  }
+  100% {
+    opacity: 1;
+  }
 }
 
 /* ---- wizard -------------------------------------------------------------
@@ -355,11 +421,15 @@ body {
 
 /* Respect a reader who has asked the system for less motion. */
 @media (prefers-reduced-motion: reduce) {
-  .leaf-away-forward,
-  .leaf-settle-forward,
-  .leaf-away-back,
-  .leaf-settle-back,
-  .leaf-shadow,
+  /* The leaf is hidden outright rather than merely un-animated: a sheet of
+     paper frozen mid-turn across the page would be worse than no turn. */
+  .leaf,
+  .leaf-cast-shadow {
+    display: none;
+  }
+
+  .leaf-face::before,
+  .page-settling,
   .veil-in,
   .panel-in,
   .step-in-forward,

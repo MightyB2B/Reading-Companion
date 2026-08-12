@@ -494,6 +494,23 @@ pub fn is_supported_image(bytes: &[u8]) -> bool {
     !matches!(sniff(bytes), SourceKind::Unrecognised)
 }
 
+/// Re-encode a page image rotated 180 degrees.
+///
+/// For the legibility retry: `orient` can tell a sideways page from an upright
+/// one geometrically, but not an upright page from an upside-down one — both
+/// have the same line spacing. So the transcription is attempted, checked
+/// against the dictionary, and the page turned over if it came out as shapes
+/// rather than words.
+pub fn turn_page_over(path: &str) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(path)?;
+    let flipped = decode_any(&bytes)?.rotate180();
+
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
+    encoder.encode_image(&flipped)?;
+    Ok(out.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

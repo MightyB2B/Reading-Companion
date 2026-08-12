@@ -213,8 +213,58 @@ export interface VocabEntry {
   gloss: string | null;
 }
 
+export interface ModelInfo {
+  name: string;
+  size_bytes: number;
+  /** e.g. "4.0B". Empty when the server does not report it. */
+  parameter_size: string;
+  /** e.g. "Q4_K_M". */
+  quantization: string;
+  /** e.g. ["vision", "completion", "tools", "thinking"]. */
+  capabilities: string[];
+}
+
+/** Can this model be shown an image? */
+export const seesImages = (m: ModelInfo) => m.capabilities.includes("vision");
+
+export interface Settings {
+  /** Where Ollama is — not necessarily this machine. */
+  ollama_host: string;
+  /** Bearer token for a hosted server. Empty for a local Ollama. */
+  ollama_api_key: string;
+  ocr_model: string;
+  text_model: string;
+  vision_model: string;
+  /** How long the server holds a model — "30m", "2h", or "-1" for never. */
+  keep_alive: string;
+}
+
+/**
+ * Ollama accepts any duration string, but a typo silently becomes its own
+ * 5-minute default, so these are offered as a list rather than typed.
+ */
+export const KEEP_ALIVE_CHOICES: { value: string; label: string; hint: string }[] = [
+  { value: "5m", label: "5 minutes", hint: "Frees memory quickly. Expect reloads." },
+  { value: "30m", label: "30 minutes", hint: "Covers a reading session on a shared machine." },
+  { value: "2h", label: "2 hours", hint: "A long sitting without paying for a reload." },
+  { value: "-1", label: "Never unload", hint: "For a dedicated server. Models stay in VRAM." },
+];
+
 export const api = {
   checkOllama: () => invoke<OllamaStatus>("check_ollama"),
+
+  getSettings: () => invoke<Settings>("get_settings"),
+  defaultSettings: () => invoke<Settings>("default_settings"),
+  /** Saves and returns the cleaned-up values actually stored. */
+  saveSettings: (settings: Settings) =>
+    invoke<Settings>("save_settings", { settings }),
+  /** Try a server without committing to it. */
+  testOllamaHost: (host: string, apiKey?: string) =>
+    invoke<OllamaStatus>("test_ollama_host", { host, apiKey }),
+
+  /** Models installed on a server — the typed one, or the configured one. */
+  listModels: (host?: string, apiKey?: string) =>
+    invoke<ModelInfo[]>("list_models", { host, apiKey }),
 
   listBooks: () => invoke<Book[]>("list_books"),
   createBook: (title: string, author: string | null, era: Era) =>
