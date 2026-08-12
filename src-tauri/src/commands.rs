@@ -35,6 +35,39 @@ pub fn set_server_address(state: State<'_, AppState>, url: String) -> Result<Str
     Ok(state.session.base_url())
 }
 
+/// Trust the library server's certificate.
+///
+/// Needed when the server has one no public authority signed, which is the
+/// normal case for a machine on your own network. Reading the file here
+/// rather than in the webview keeps it a path the reader picked with a native
+/// dialog.
+///
+/// The alternative — turning certificate checking off — would mean anything
+/// on the network could impersonate the server and read every page you read.
+/// Trusting one specific certificate keeps that from being possible.
+#[tauri::command]
+pub async fn trust_server_certificate(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<bool> {
+    let pem = tokio::fs::read_to_string(&path).await?;
+    let stored = state.session.set_root_cert(Some(pem))?;
+    crate::remember_certificate(&app, stored.as_deref());
+    Ok(stored.is_some())
+}
+
+/// Go back to the system's own list of authorities.
+#[tauri::command]
+pub fn forget_server_certificate(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<()> {
+    state.session.set_root_cert(None)?;
+    crate::remember_certificate(&app, None);
+    Ok(())
+}
+
 /// Is the server there, and does it have any accounts yet?
 ///
 /// Answers the sign-in screen's two questions in one call: whether to offer
@@ -45,7 +78,13 @@ pub async fn server_state(state: State<'_, AppState>) -> Result<Value> {
     Ok(serde_json::json!({
         "reachable": true,
         "needs_setup": setup.get("needs_setup").and_then(Value::as_bool).unwrap_or(false),
+        "registration_open": setup
+            .get("registration_open")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         "signed_in": state.session.is_signed_in(),
+        "encrypted": state.session.base_url().starts_with("https://"),
+        "trusting_own_certificate": state.session.has_root_cert(),
     }))
 }
 

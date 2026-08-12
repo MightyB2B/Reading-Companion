@@ -11,6 +11,10 @@ anyhow = "1.0.104"
 # a second, which is exactly what SHA-256 would allow.
 argon2 = "0.5"
 axum = { version = "0.8", features = ["macros"] }
+# TLS termination in the server itself rather than a reverse proxy in front.
+# The proxy was only ever there because Ollama could not authenticate; now
+# that every request carries a session, the server is the right place for it.
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.23.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 dotenvy = "0.15"

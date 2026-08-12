@@ -194,7 +194,19 @@ If PostgreSQL is already installed, it needs its superuser password: `$env:PGPAS
 
 The server's configuration lives in `.env` beside the binary, readable only by Administrators. That is deliberate: a Windows service starts in `system32` rather than where it was installed, so it can only find configuration next to itself — and the alternative, machine-wide environment variables, would put the database password where every account on the box can read it.
 
-There is **no TLS** on that port. The firewall rule keeps it to your own subnet, which is the intended shape; exposing it to the internet needs a reverse proxy in front, the way `secure-ollama-wan.ps1` does for Ollama.
+**The connection is encrypted.** The installer generates a certificate and the server terminates TLS itself — no reverse proxy. It is self-signed, because no public authority will sign a certificate for `192.168.x.x`, so the reading machine has to be told to trust that one certificate. Copy `server-cert.pem` (which the installer leaves beside itself) to the reading machine and use **Trust a certificate…** on the sign-in screen. Once, not every launch.
+
+That is a stronger guarantee than a public certificate authority, not a weaker one: only your server can present that certificate. The alternative — accepting any certificate — would let anything on the network impersonate your library and read everything you read, which is why the application will not do it.
+
+The certificate is public by design; the private key never leaves the server and is readable only by Administrators.
+
+To check a server before trusting it from the app:
+
+```bash
+cargo run -p reading-core --example check-tls -- https://192.168.4.252:7878 server-cert.pem
+```
+
+That uses the same client the application does, and reports both halves: that the connection is refused *without* the certificate, and accepted with it. Windows `curl` cannot answer this — it uses schannel, which ignores `--cacert`.
 
 ### Building an installer
 
@@ -410,7 +422,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup-ollama-server.ps1
 
 Run it from an elevated prompt so it can add the firewall rule; without elevation it does everything else and prints the one command you need to run as admin. Defaults assume a dedicated box: three models resident, never unloaded. `-MaxLoaded 2` and `-KeepAlive 30m` suit a machine you also use for other things.
 
-Ollama has no authentication. The firewall scope is what protects it, so do not forward that port on your router — put a reverse proxy requiring a bearer token in front instead, and give the token to the API key field.
+**Ollama should not be reachable at all.** Since the split, the only thing that talks to it is `reading-server`, usually on the same machine — so bind it to loopback and give it no firewall rule. It has no authentication of its own and does not need any: the request that reaches it has already been authenticated by the library server, against a real account.
+
+That replaces the reverse-proxy arrangement entirely. `secure-ollama-wan.ps1` is kept for exposing Ollama to *something else*, but Reading Companion no longer needs it, and neither does the API key field unless you point the server at a hosted endpoint.
+
+The path is: **app → reading-server → Ollama.** Encrypted and authenticated on the first hop, loopback on the second. AI usage is tied to whoever is signed in rather than to one shared key.
 
 ### Keeping models loaded
 

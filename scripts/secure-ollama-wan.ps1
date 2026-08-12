@@ -3,6 +3,15 @@
     Puts an authenticating HTTPS reverse proxy in front of Ollama so it can be
     exposed to the internet without handing strangers your GPU.
 
+    NOT NEEDED BY READING COMPANION ANY MORE. The application talks to
+    reading-server, which talks to Ollama on its own machine; Ollama itself
+    should be on loopback and reachable by nothing. TLS and authentication now
+    live in reading-server, which install-server.ps1 sets up.
+
+    Kept for exposing Ollama to something else -- another tool, another
+    machine -- where you still need a proxy that can authenticate, because
+    Ollama cannot.
+
 .DESCRIPTION
     Ollama has no authentication of its own, and its API can pull, create, and
     delete models. Exposed directly, port 11434 is a remote wipe button and an

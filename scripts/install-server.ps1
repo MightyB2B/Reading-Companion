@@ -90,7 +90,8 @@ param(
     [switch]$Loopback,
     [switch]$SkipPostgresInstall,
     [switch]$SkipRustInstall,
-    [switch]$SkipDictBuild
+    [switch]$SkipDictBuild,
+    [switch]$NoTls
 )
 
 $ErrorActionPreference = 'Stop'
@@ -206,6 +207,75 @@ function Install-RustToolchain {
 
     Write-Ok "Rust ($cargo)"
     return $true
+}
+
+# --- Exporting an RSA private key as PEM, on PowerShell 5.1 ------------------
+#
+# .NET's ExportPkcs8PrivateKey would do this in one line, but it arrived in
+# .NET Core and PowerShell 5.1 runs on .NET Framework, where the method simply
+# is not there. Requiring PowerShell 7 on a server to install a service is a
+# worse trade than encoding the structure by hand, which is small and fixed:
+#
+#   RSAPrivateKey ::= SEQUENCE { version, n, e, d, p, q, dp, dq, qinv }
+#
+# rustls reads PKCS#1 as happily as PKCS#8, so this is a complete answer
+# rather than a workaround.
+
+function ConvertTo-DerLength {
+    param([int]$Length)
+    if ($Length -lt 0x80) { return [byte[]]@($Length) }
+    $bytes = [System.Collections.Generic.List[byte]]::new()
+    $n = $Length
+    while ($n -gt 0) { $bytes.Insert(0, [byte]($n -band 0xFF)); $n = $n -shr 8 }
+    return @([byte](0x80 -bor $bytes.Count)) + $bytes.ToArray()
+}
+
+function ConvertTo-DerInteger {
+    param([byte[]]$Value)
+    # Leading zeros are not part of the number.
+    $i = 0
+    while ($i -lt ($Value.Length - 1) -and $Value[$i] -eq 0) { $i++ }
+    $trimmed = $Value[$i..($Value.Length - 1)]
+    # DER integers are signed, so a high bit set means an extra zero byte or
+    # the value reads as negative.
+    if ($trimmed[0] -band 0x80) { $trimmed = @([byte]0) + $trimmed }
+    return @([byte]0x02) + (ConvertTo-DerLength $trimmed.Length) + $trimmed
+}
+
+function ConvertTo-DerSequence {
+    param([byte[]]$Contents)
+    return @([byte]0x30) + (ConvertTo-DerLength $Contents.Length) + $Contents
+}
+
+function Export-RsaPrivateKeyPem {
+    param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+
+    $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+    if (-not $rsa) { throw "the certificate has no RSA private key" }
+
+    # CNG keys refuse to export their parameters unless re-imported through a
+    # plain RSA object, which is why this is not simply $rsa.ExportParameters.
+    $params = $null
+    try {
+        $params = $rsa.ExportParameters($true)
+    } catch {
+        throw "the private key is not exportable: $_"
+    }
+
+    $body = @()
+    $body += ConvertTo-DerInteger @([byte]0)          # version
+    $body += ConvertTo-DerInteger $params.Modulus
+    $body += ConvertTo-DerInteger $params.Exponent
+    $body += ConvertTo-DerInteger $params.D
+    $body += ConvertTo-DerInteger $params.P
+    $body += ConvertTo-DerInteger $params.Q
+    $body += ConvertTo-DerInteger $params.DP
+    $body += ConvertTo-DerInteger $params.DQ
+    $body += ConvertTo-DerInteger $params.InverseQ
+
+    $der = ConvertTo-DerSequence $body
+    $b64 = [Convert]::ToBase64String($der, 'InsertLineBreaks')
+    return "-----BEGIN RSA PRIVATE KEY-----`n$b64`n-----END RSA PRIVATE KEY-----`n"
 }
 
 function Find-Psql {
@@ -645,6 +715,85 @@ if ($lan) {
 }
 
 # =============================================================================
+# 4b. TLS
+# =============================================================================
+#
+# The server terminates TLS itself. A reverse proxy used to be necessary
+# because Ollama has no authentication and had to be fronted by something that
+# did; every request now carries a session this server verifies, so a second
+# process would add nothing but another thing to configure.
+
+$certPem = Join-Path $InstallDir 'server-cert.pem'
+$keyPem  = Join-Path $InstallDir 'server-key.pem'
+$clientCopy = Join-Path $here 'server-cert.pem'
+$useTls = $false
+
+if ($NoTls) {
+    Write-Head "TLS"
+    Write-Hmm "Disabled with -NoTls; traffic will be plaintext"
+} elseif ($Loopback) {
+    Write-Head "TLS"
+    Write-Ok "Not needed: loopback traffic never reaches a network"
+} else {
+    Write-Head "TLS"
+
+    if ((Test-Path $certPem) -and (Test-Path $keyPem)) {
+        Write-Ok "Certificate already present; keeping it"
+        Write-Note "Readers who trusted it stay trusting it."
+        $useTls = $true
+    } else {
+        # Self-signed, because a public authority will not sign a certificate
+        # for 192.168.x.x. The client is given this exact certificate to
+        # trust, which is a stronger guarantee than a public CA anyway: only
+        # this server can present it.
+        $names = @()
+        if ($lan) { $names += $lan.IPAddress }
+        $names += $env:COMPUTERNAME
+        $names += 'localhost'
+        $names = $names | Where-Object { $_ } | Select-Object -Unique
+
+        Write-Note "Generating a certificate for: $($names -join ', ')"
+
+        try {
+            # A long life on purpose: renewing means every reader has to trust
+            # the new one, and a home server has nobody to do that on a
+            # schedule.
+            $cert = New-SelfSignedCertificate `
+                -Subject "CN=Reading Companion" `
+                -DnsName $names `
+                -KeyAlgorithm RSA -KeyLength 2048 `
+                -NotAfter (Get-Date).AddYears(10) `
+                -CertStoreLocation 'Cert:\LocalMachine\My' `
+                -KeyExportPolicy Exportable `
+                -ErrorAction Stop
+
+            New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+
+            # PEM, which is what rustls reads and what reqwest accepts.
+            $certB64 = [Convert]::ToBase64String($cert.RawData, 'InsertLineBreaks')
+            $certText = "-----BEGIN CERTIFICATE-----`n$certB64`n-----END CERTIFICATE-----`n"
+            [System.IO.File]::WriteAllText($certPem, $certText, (New-Object System.Text.UTF8Encoding($false)))
+
+            $keyText = Export-RsaPrivateKeyPem -Certificate $cert
+            [System.IO.File]::WriteAllText($keyPem, $keyText, (New-Object System.Text.UTF8Encoding($false)))
+            Protect-File $keyPem
+
+            # Out of the machine store: the files are the copies that matter,
+            # and leaving it installed implies a trust nobody asked for.
+            Remove-Item -Path "Cert:\LocalMachine\My\$($cert.Thumbprint)" -Force -ErrorAction SilentlyContinue
+
+            Copy-Item $certPem $clientCopy -Force
+            $useTls = $true
+            Write-Ok "Certificate written, valid 10 years"
+            Write-Note "Private key readable only by Administrators."
+        } catch {
+            Write-Hmm "Could not generate a certificate: $_"
+            Write-Note "Installing without TLS. Traffic will be plaintext."
+        }
+    }
+}
+
+# =============================================================================
 # 5. Install the files
 # =============================================================================
 
@@ -682,6 +831,11 @@ if (Test-Path $dict) {
 # DATABASE_URL set and LIBRARY_DIR missing, fall back to a relative path,
 # resolve it against system32, and die with "access denied" on a path nobody
 # chose. Single quotes are taken literally.
+$tlsLines = ''
+if ($useTls) {
+    $tlsLines = "TLS_CERT='$certPem'`nTLS_KEY='$keyPem'`n"
+}
+
 $contents = @"
 # Written by install-server.ps1. Not for version control.
 #
@@ -690,6 +844,7 @@ DATABASE_URL='$DatabaseUrl'
 BIND_ADDRESS=$bind
 LIBRARY_DIR='$libraryDir'
 DICT_PATH='$dictPath'
+$tlsLines
 "@
 
 # WriteAllText, not Set-Content -Encoding utf8: on PowerShell 5.1 that writes
@@ -774,10 +929,30 @@ Write-Ok "Running, and set to start automatically"
 
 Write-Head "Checking it works"
 
+$scheme = if ($useTls) { 'https' } else { 'http' }
+
+# PowerShell 5.1 has no -SkipCertificateCheck, and this certificate is
+# deliberately not in any trust store, so verification is turned off for this
+# one check. It is a loopback request to a server we just installed: the
+# question being answered is "did it start", not "is it who it claims".
+if ($useTls) {
+    Add-Type -TypeDefinition @"
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+public class SelfSignedPolicy : ICertificatePolicy {
+    public bool CheckValidationResult(ServicePoint sp, X509Certificate cert, WebRequest req, int problem) {
+        return true;
+    }
+}
+"@ -ErrorAction SilentlyContinue
+    [System.Net.ServicePointManager]::CertificatePolicy = New-Object SelfSignedPolicy
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+}
+
 $health = $null
 for ($i = 0; $i -lt 30; $i++) {
     try {
-        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2
+        $health = Invoke-RestMethod -Uri "${scheme}://127.0.0.1:$Port/api/health" -TimeoutSec 2
         if ($health.status -eq 'ok') { break }
     } catch { Start-Sleep -Seconds 1 }
 }
@@ -792,7 +967,7 @@ if (-not $health -or $health.status -ne 'ok') {
 }
 Write-Ok "Healthy, version $($health.version)"
 
-$setup = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/setup-state" -TimeoutSec 5
+$setup = Invoke-RestMethod -Uri "${scheme}://127.0.0.1:$Port/api/setup-state" -TimeoutSec 5
 if ($setup.needs_setup) {
     Write-Ok "The library is empty and ready for its first account"
 } else {
@@ -803,7 +978,7 @@ if ($setup.needs_setup) {
 # 9. Report
 # =============================================================================
 
-$address = if ($lan -and -not $Loopback) { "http://$($lan.IPAddress):$Port" } else { "http://127.0.0.1:$Port" }
+$address = if ($lan -and -not $Loopback) { "${scheme}://$($lan.IPAddress):$Port" } else { "${scheme}://127.0.0.1:$Port" }
 
 Write-Host ""
 Write-Host "  ------------------------------------------------------------" -ForegroundColor Green
@@ -830,9 +1005,22 @@ Write-Host ""
 Write-Host "  Set the inference server's address in Settings after signing" -ForegroundColor DarkGray
 Write-Host "  in. It defaults to this machine's own Ollama." -ForegroundColor DarkGray
 Write-Host ""
-if (-not $Loopback -and $Subnet -and $Subnet -ne 'none') {
-    Write-Host "  There is no TLS on this port. That is fine on a LAN; if you" -ForegroundColor Yellow
-    Write-Host "  expose it to the internet, put a reverse proxy in front the" -ForegroundColor Yellow
-    Write-Host "  way secure-ollama-wan.ps1 does for Ollama." -ForegroundColor Yellow
+if ($useTls) {
+    Write-Host "  ENCRYPTED. The certificate is self-signed, so the reading" -ForegroundColor Yellow
+    Write-Host "  machine has to be told to trust this one specifically." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Copy this file to the reading machine:" -ForegroundColor Yellow
+    Write-Host "      $clientCopy" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Then on the sign-in screen, choose 'Trust a certificate'" -ForegroundColor Yellow
+    Write-Host "  and pick it. Once, not every launch." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  It is not secret -- a certificate is public by design. The" -ForegroundColor DarkGray
+    Write-Host "  private key stays here and never leaves." -ForegroundColor DarkGray
+    Write-Host ""
+} elseif (-not $Loopback -and $Subnet -and $Subnet -ne 'none') {
+    Write-Host "  NOT ENCRYPTED. Traffic on this port is plaintext, including" -ForegroundColor Yellow
+    Write-Host "  session tokens and everything you read. Re-run without" -ForegroundColor Yellow
+    Write-Host "  -NoTls to generate a certificate." -ForegroundColor Yellow
     Write-Host ""
 }

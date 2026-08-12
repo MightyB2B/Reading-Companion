@@ -160,15 +160,53 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("BIND_ADDRESS {bind:?} is not an address: {e}"))?;
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("listening on http://{addr}");
+    // TLS when a certificate is configured, plain HTTP otherwise.
+    //
+    // Terminated here rather than by a reverse proxy. The proxy existed only
+    // because Ollama has no authentication of its own and had to be fronted by
+    // something that did; every request now carries a session this server
+    // already verifies, so there is nothing left for a second process to add.
+    let cert = std::env::var("TLS_CERT").ok().filter(|s| !s.trim().is_empty());
+    let key = std::env::var("TLS_KEY").ok().filter(|s| !s.trim().is_empty());
 
-    if addr.ip().is_loopback() {
-        tracing::info!("loopback only; set BIND_ADDRESS=0.0.0.0:7878 to accept from the network");
-    } else {
-        tracing::warn!("reachable from the network. There is no TLS here: put a reverse proxy in front before exposing this beyond a trusted LAN.");
+    match (cert, key) {
+        (Some(cert), Some(key)) => {
+            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("could not read the certificate at {cert} or key at {key}: {e}")
+                })?;
+
+            tracing::info!("listening on https://{addr}");
+            tracing::info!(certificate = %cert, "TLS enabled");
+
+            axum_server::bind_rustls(addr, config)
+                .serve(app.into_make_service())
+                .await?;
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            // Refused rather than quietly falling back to plaintext: someone
+            // who configured half of TLS believes they have all of it.
+            anyhow::bail!("TLS_CERT and TLS_KEY must both be set, or neither");
+        }
+        (None, None) => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            tracing::info!("listening on http://{addr}");
+
+            if addr.ip().is_loopback() {
+                tracing::info!(
+                    "loopback only; set BIND_ADDRESS=0.0.0.0:7878 to accept from the network"
+                );
+            } else {
+                tracing::warn!(
+                    "reachable from the network without TLS. Set TLS_CERT and TLS_KEY \
+                     to encrypt it; install-server.ps1 can generate a certificate."
+                );
+            }
+
+            axum::serve(listener, app).await?;
+        }
     }
 
-    axum::serve(listener, app).await?;
     Ok(())
 }

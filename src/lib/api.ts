@@ -273,6 +273,10 @@ export interface ServerState {
   /** Whether an account can be created at all — see `open_registration`. */
   registration_open: boolean;
   signed_in: boolean;
+  /** Talking to it over HTTPS. */
+  encrypted: boolean;
+  /** Using a certificate this machine was told to trust, rather than a public one. */
+  trusting_own_certificate: boolean;
 }
 
 /** What a transcription produced. */
@@ -305,6 +309,18 @@ export const api = {
 
   /** Is it there, does it have accounts, and are we signed in? */
   serverState: () => invoke<ServerState>("server_state"),
+
+  /**
+   * Trust the server's certificate, given the file it wrote.
+   *
+   * Needed when the server has one no public authority signed, which is
+   * normal for a machine on your own network. The alternative — accepting any
+   * certificate — would let anything on that network impersonate your server.
+   */
+  trustServerCertificate: (path: string) =>
+    invoke<boolean>("trust_server_certificate", { path }),
+
+  forgetServerCertificate: () => invoke<void>("forget_server_certificate"),
 
   signIn: (email: string, password: string) =>
     invoke<Account>("sign_in", { email, password }),

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api, type Account, type ServerState } from "../lib/api";
 import { Spinner } from "./Spinner";
 
@@ -49,6 +50,22 @@ export function SignIn({ onSignedIn }: { onSignedIn: (account: Account) => void 
     const timer = setTimeout(check, 300);
     return () => clearTimeout(timer);
   }, [address]);
+
+  const trustCertificate = async () => {
+    const chosen = await open({
+      multiple: false,
+      filters: [{ name: "Certificate", extensions: ["pem", "crt", "cer"] }],
+    });
+    if (typeof chosen !== "string") return;
+
+    setError(null);
+    try {
+      await api.trustServerCertificate(chosen);
+      await check();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   const changeAddress = async (next: string) => {
     setAddress(next);
@@ -121,7 +138,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: (account: Account) => void 
             ) : server ? (
               <span className="text-emerald-700">
                 <span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-emerald-600" />
-                Found it
+                {server.encrypted ? "Found it, encrypted" : "Found it"}
               </span>
             ) : (
               <span className="text-red-600">
@@ -130,6 +147,51 @@ export function SignIn({ onSignedIn }: { onSignedIn: (account: Account) => void 
               </span>
             )}
           </p>
+
+          {/* An https address that will not connect is usually a certificate
+              the machine has not been told to trust, and the underlying error
+              says so in language nobody should have to read. */}
+          {!checking && !server && address.startsWith("https") && (
+            <div className="mt-2 rounded border border-rule bg-paper-dim px-3 py-2 text-xs">
+              <p className="text-ink-soft">
+                If this server made its own certificate, this machine has to be
+                told to trust it once.
+              </p>
+              <button
+                type="button"
+                onClick={trustCertificate}
+                className="mt-1.5 text-accent hover:underline"
+              >
+                Trust a certificate…
+              </button>
+              <p className="mt-1 text-ink-soft">
+                The installer wrote <code>server-cert.pem</code> beside itself.
+              </p>
+            </div>
+          )}
+
+          {server?.trusting_own_certificate && (
+            <p className="mt-1.5 text-xs text-ink-soft">
+              Trusting this server's own certificate.{" "}
+              <button
+                type="button"
+                onClick={async () => {
+                  await api.forgetServerCertificate().catch(() => {});
+                  check();
+                }}
+                className="text-accent hover:underline"
+              >
+                Forget it
+              </button>
+            </p>
+          )}
+
+          {!checking && server && !server.encrypted && !address.includes("127.0.0.1") && (
+            <p className="mt-1.5 text-xs text-amber-600">
+              Not encrypted. Anything on the network between here and there can
+              read what you send, including your password.
+            </p>
+          )}
 
           <div className="mt-5 border-t border-rule pt-5">
             <label className="block text-sm font-medium" htmlFor="email">
