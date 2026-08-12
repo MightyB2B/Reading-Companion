@@ -190,10 +190,33 @@ if (Test-Path $binary) {
             $problems.Add("no reading-server.exe")
         }
     } else {
-        Write-Bad "reading-server.exe is missing"
-        Write-Note "On a machine with Rust:"
+        Write-Bad "reading-server.exe is missing, and it cannot be built here"
+
+        # Which of the two is absent changes the answer entirely, so say so
+        # rather than printing one set of instructions for both cases.
+        if ($repo) {
+            Write-Note "Found a checkout at $repo, but cargo is not installed."
+        } else {
+            Write-Note "No checkout found here or one directory up."
+        }
+        if (-not $cargo) {
+            Write-Note "No cargo on PATH."
+        }
+
+        Write-Note ""
+        Write-Note "Easiest: build it on a machine that has Rust and copy two"
+        Write-Note "files next to this script:"
         Write-Note "    cargo build --release -p reading-server"
-        Write-Note "then copy target\release\reading-server.exe next to this script."
+        Write-Note "    npm run dict:build"
+        Write-Note "then copy"
+        Write-Note "    target\release\reading-server.exe"
+        Write-Note "    src-tauri\resources\dict.sqlite"
+        Write-Note "to $here"
+        Write-Note ""
+        Write-Note "Or install Rust here and re-run, and this will build it:"
+        Write-Note "    winget install Rustlang.Rustup"
+        Write-Note "(that also needs the MSVC C++ build tools, several GB)"
+
         $problems.Add("no reading-server.exe")
     }
 }
