@@ -250,17 +250,103 @@ export const KEEP_ALIVE_CHOICES: { value: string; label: string; hint: string }[
   { value: "-1", label: "Never unload", hint: "For a dedicated server. Models stay in VRAM." },
 ];
 
+/** Who you are signed in as. The session token is never sent here. */
+export interface Account {
+  id: number;
+  email: string;
+  display_name: string;
+  /** Only an administrator may change the inference server's address. */
+  is_admin: boolean;
+}
+
+export interface ServerState {
+  reachable: boolean;
+  /** No accounts yet, so offer to create the first one. */
+  needs_setup: boolean;
+  signed_in: boolean;
+}
+
+/** What a transcription produced. */
+export interface TranscriptionResult {
+  blocks: Block[];
+  page_no: number | null;
+  page_no_source: "detected" | "manual" | "unknown";
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  ollama_host: "http://127.0.0.1:11434",
+  ollama_api_key: "",
+  ocr_model: "glm-ocr",
+  text_model: "qwen3:4b",
+  vision_model: "qwen3-vl:4b",
+  keep_alive: "30m",
+};
+
 export const api = {
+  // --- The library server, and who you are to it ---
+  //
+  // The session token lives in Rust and is never handed to this side: an
+  // imported web page or a transcription is rendered in the same webview, and
+  // a script hiding in one could read anything JavaScript can reach.
+
+  /** Where the library is. */
+  serverAddress: () => invoke<string>("server_address"),
+  setServerAddress: (url: string) => invoke<string>("set_server_address", { url }),
+
+  /** Is it there, does it have accounts, and are we signed in? */
+  serverState: () => invoke<ServerState>("server_state"),
+
+  signIn: (email: string, password: string) =>
+    invoke<Account>("sign_in", { email, password }),
+
+  register: (email: string, displayName: string, password: string) =>
+    invoke<Account>("register", { email, displayName, password }),
+
+  signOut: () => invoke<void>("sign_out"),
+
+  /** The signed-in account, or null when nobody is. */
+  currentAccount: () => invoke<Account | null>("current_account"),
+
   checkOllama: () => invoke<OllamaStatus>("check_ollama"),
 
   getSettings: () => invoke<Settings>("get_settings"),
-  defaultSettings: () => invoke<Settings>("default_settings"),
+  /**
+   * The defaults, so Settings can offer to restore them.
+   *
+   * Held here rather than fetched: they are constants, and a round trip to
+   * a server to learn a constant would be silly.
+   */
+  defaultSettings: async (): Promise<Settings> => ({ ...DEFAULT_SETTINGS }),
   /** Saves and returns the cleaned-up values actually stored. */
   saveSettings: (settings: Settings) =>
     invoke<Settings>("save_settings", { settings }),
-  /** Try a server without committing to it. */
-  testOllamaHost: (host: string, apiKey?: string) =>
-    invoke<OllamaStatus>("test_ollama_host", { host, apiKey }),
+  /**
+   * Try an inference server without committing to it.
+   *
+   * Asking what it has installed is the test: a server that answers with a
+   * model list is reachable, authenticated, and speaking the right protocol,
+   * which no narrower check establishes.
+   */
+  testOllamaHost: async (host: string, apiKey?: string): Promise<OllamaStatus> => {
+    try {
+      const models = await api.listModels(host, apiKey);
+      return {
+        reachable: true,
+        models: models.map((m) => m.name),
+        ocr_model_ready: true,
+        text_model_ready: true,
+        message: `Reached ${host} — ${models.length} models installed.`,
+      };
+    } catch (e) {
+      return {
+        reachable: false,
+        models: [],
+        ocr_model_ready: false,
+        text_model_ready: false,
+        message: String(e),
+      };
+    }
+  },
 
   /** Models installed on a server — the typed one, or the configured one. */
   listModels: (host?: string, apiKey?: string) =>
@@ -285,8 +371,8 @@ export const api = {
   resumePage: (bookId: number) => invoke<number | null>("resume_page", { bookId }),
   importPage: (bookId: number, sourcePath: string) =>
     invoke<ImportResult>("import_page", { bookId, sourcePath }),
-  runOcr: (pageId: number, bookId: number) =>
-    invoke<Block[]>("run_ocr", { pageId, bookId }),
+  /** Transcribe a page. Returns its blocks and whatever number was read. */
+  runOcr: (pageId: number) => invoke<TranscriptionResult>("run_ocr", { pageId }),
 
   listBlocks: (pageId: number) => invoke<Block[]>("list_blocks", { pageId }),
   editBlock: (blockId: number, text: string) =>
@@ -344,6 +430,15 @@ export const api = {
   /** Import an EPUB, PDF, or web page — text sources, so no OCR. */
   importDocument: (bookId: number, source: string) =>
     invoke<DocumentImport>("import_document", { bookId, source }),
+
+  /**
+   * A page photograph, as a data URI.
+   *
+   * Fetched through Rust rather than by the webview, because the image lives
+   * on the server behind an authenticated route and the token is not
+   * available here.
+   */
+  pageImage: (pageId: number) => invoke<string>("page_image", { pageId }),
 };
 
 /** The sentence containing `word` within `text`, for the in-context lookup. */

@@ -26,11 +26,22 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`, plus the large build
-      //    artefacts: watching the 23MB dictionary source and the 40MB
-      //    generated database makes the dev server fall over with EBUSY while
-      //    the build script is writing them.
-      ignored: ["**/src-tauri/**", "**/.cache/**", "**/dist/**"],
+      // 3. tell Vite to ignore watching `src-tauri` and `crates`, plus the
+      //    large build artefacts: watching the 23MB dictionary source and the
+      //    40MB generated database makes the dev server fall over with EBUSY
+      //    while the build script is writing them.
+      //
+      //    `target/` matters since the cargo workspace split moved it to the
+      //    repository root. It used to live under src-tauri/ and be covered by
+      //    the first pattern; uncovered, Vite tries to watch the executable
+      //    cargo is in the middle of linking and dies with EBUSY.
+      ignored: [
+        "**/src-tauri/**",
+        "**/crates/**",
+        "**/target/**",
+        "**/.cache/**",
+        "**/dist/**",
+      ],
     },
   },
 }));

@@ -156,11 +156,11 @@ export function Reader({ book }: { book: Book }) {
             : "Reading the page…",
         );
         setProgress("");
-        const newBlocks = await api.runOcr(id, book.id);
+        const transcribed = await api.runOcr(id);
         if (id === page_id) {
-          setBlocks(newBlocks);
+          setBlocks(transcribed.blocks);
           setActiveBlock(
-            newBlocks.find((b) => b.kind === "paragraph")?.id ?? null,
+            transcribed.blocks.find((b) => b.kind === "paragraph")?.id ?? null,
           );
         }
       }

@@ -245,3 +245,45 @@ pub struct ContextualSense {
     pub plain_meaning: String,
     pub why_this_sense: String,
 }
+
+// ---- database result shapes ----
+//
+// Returned by whichever database layer is in use and handed straight to the
+// frontend, so they belong with the other wire types rather than being
+// declared inside a storage module — and declared twice once there are two.
+
+/// What a book contains, for a deletion prompt that says what it costs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookStats {
+    pub pages: i64,
+    pub paragraphs: i64,
+    /// Paragraphs the reader has summarised.
+    pub summaries: i64,
+    pub words_looked_up: i64,
+}
+
+/// The reader's latest note on one sentence of a paragraph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentenceSummary {
+    pub ordinal: i64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VocabEntry {
+    pub word: String,
+    pub lemma: Option<String>,
+    pub count: i64,
+    pub sentence: Option<String>,
+    pub gloss: Option<String>,
+}
+
+/// One rung of the accumulated summary the build-up step assembles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpineEntry {
+    /// Null for a page whose number has not been read yet.
+    pub page_no: Option<i64>,
+    pub ordinal: i64,
+    pub block_id: i64,
+    pub sentence: String,
+}

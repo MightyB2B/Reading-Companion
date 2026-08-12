@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
+
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, type JobProgress, type Page } from "../lib/api";
 import { Spinner } from "./Spinner";
@@ -330,8 +330,26 @@ function NumberingStep({
   const [value, setValue] = useState("");
   const [saved, setSaved] = useState(0);
   const [busy, setBusy] = useState(false);
+  /** Fetched through Rust: the image lives on the server, behind auth. */
+  const [image, setImage] = useState<string | null>(null);
 
   const page = pages[index];
+
+  useEffect(() => {
+    if (!page) return;
+    let live = true;
+    setImage(null);
+    api
+      .pageImage(page.id)
+      // Not an error worth showing: the reader can still type the number,
+      // and a broken-image icon says enough.
+      .then((uri) => live && setImage(uri))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [page?.id]);
+
   if (!page) return null;
 
   const advance = (didSave: boolean) => {
@@ -362,11 +380,17 @@ function NumberingStep({
       </p>
 
       {/* Show the page, so the reader is reading rather than guessing. */}
-      <img
-        src={convertFileSrc(page.image_proc ?? page.image_orig)}
-        alt="The page being numbered"
-        className="mt-3 max-h-48 w-full rounded border border-rule object-contain"
-      />
+      {image ? (
+        <img
+          src={image}
+          alt="The page being numbered"
+          className="mt-3 max-h-48 w-full rounded border border-rule object-contain"
+        />
+      ) : (
+        <div className="mt-3 flex h-48 items-center justify-center rounded border border-rule">
+          <Spinner size={24} />
+        </div>
+      )}
 
       {pages.length > 1 && (
         <p className="mt-2 text-xs text-ink-soft">

@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
-import { api, type Book, type OllamaStatus } from "./lib/api";
+import { api, type Account, type Book, type OllamaStatus } from "./lib/api";
 import { Library } from "./components/Library";
 import { Reader } from "./components/Reader";
 import { SettingsWindow } from "./components/SettingsWindow";
+import { SignIn } from "./components/SignIn";
+import { Spinner } from "./components/Spinner";
 import { ThemePicker } from "./components/ThemePicker";
 import "./index.css";
 
 export default function App() {
+  const [account, setAccount] = useState<Account | null>(null);
+  /** Null while we are still asking; the sign-in screen would flash otherwise. */
+  const [ready, setReady] = useState(false);
   const [status, setStatus] = useState<OllamaStatus | null>(null);
   const [book, setBook] = useState<Book | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -14,9 +19,39 @@ export default function App() {
   const refreshStatus = () =>
     api.checkOllama().then(setStatus).catch(() => setStatus(null));
 
+  // A stored session may still be good, so the reader is not asked to sign in
+  // every launch. Null just means nobody is — the ordinary case at startup,
+  // not a failure.
   useEffect(() => {
-    refreshStatus();
+    api
+      .currentAccount()
+      .then(setAccount)
+      .catch(() => setAccount(null))
+      .finally(() => setReady(true));
   }, []);
+
+  useEffect(() => {
+    if (account) refreshStatus();
+  }, [account]);
+
+  const signOut = async () => {
+    await api.signOut().catch(() => {});
+    setAccount(null);
+    setBook(null);
+    setStatus(null);
+  };
+
+  if (!ready) {
+    return (
+      <div className="flex h-full items-center justify-center bg-paper">
+        <Spinner />
+      </div>
+    );
+  }
+
+  if (!account) {
+    return <SignIn onSignedIn={setAccount} />;
+  }
 
   return (
     <div className="flex h-full flex-col bg-paper text-ink">
@@ -35,6 +70,13 @@ export default function App() {
         )}
         <div className="ml-auto flex items-center gap-3">
           <OllamaBadge status={status} />
+          <button
+            onClick={signOut}
+            title={`Signed in as ${account.email}`}
+            className="text-xs text-ink-soft hover:text-accent"
+          >
+            {account.display_name || account.email}
+          </button>
           <ThemePicker />
           <button
             onClick={() => setSettingsOpen(true)}

@@ -2,9 +2,11 @@
 
 A desktop application for reading difficult books slowly and actually understanding them.
 
-Photograph a page, or import an ebook, and work through it one paragraph at a time: read it, break it into sentences, compress it into a single sentence of your own, and check that sentence says who or what it is about. A local model then tells you what you missed — without telling you the answer. Words you don't know are looked up in a dictionary from **1913**, because in a book from 1830 the modern meaning is often the wrong one.
+Photograph a page, or import an ebook, and work through it one paragraph at a time: read it, break it into sentences, compress it into a single sentence of your own, and check that sentence says who or what it is about. A model then tells you what you missed — without telling you the answer. Words you don't know are looked up in a dictionary from **1913**, because in a book from 1830 the modern meaning is often the wrong one.
 
-Everything runs on your machine. Nothing about what you read leaves it.
+**Your library lives on a server you run.** A desktop application talks to it; the server holds the books, the page images, and the model work, so a laptop can read a library that a machine with a real GPU is doing the thinking for. Accounts are separate: one person cannot see another's books, and the checks that guarantee it are in SQL rather than in code anyone could forget to call.
+
+Everything runs on machines you own. Nothing about what you read reaches a third party.
 
 ---
 
@@ -70,7 +72,8 @@ For EPUBs, the file's own table of contents is used, walked recursively — a re
 |---|---|---|
 | [Node.js](https://nodejs.org) | 20 or later | `node --version` |
 | [Rust](https://rustup.rs) | stable toolchain | `rustc --version` |
-| [Ollama](https://ollama.com) | running locally | `ollama --version` |
+| [Ollama](https://ollama.com) | running somewhere | `ollama --version` |
+| [PostgreSQL](https://www.postgresql.org) | 15 or later | `psql --version` |
 | C++ build tools | see below | `rustc --print target-list` succeeds |
 
 **On Windows**, Rust needs the MSVC toolchain: install **Visual Studio Build Tools** with the *Desktop development with C++* workload and a Windows SDK. `rustup` picks it up automatically. WebView2 already ships with Windows 11.
@@ -111,15 +114,44 @@ It prints its own sanity checks and fails loudly if any of them break:
 
 The database is **not** committed — it is regenerable, and 40MB of derived data does not belong in a repository. The app runs without it: hyphenation falls back to a case heuristic and word lookup is unavailable, but nothing breaks.
 
+Create the library database. This makes a Postgres role and database and writes the connection string to `.env`:
+
+```bash
+$env:PGPASSWORD = 'your-postgres-password'; powershell -ExecutionPolicy Bypass -File .\scripts\setup-postgres.ps1
+```
+
+The schema itself is applied by the server on first run, not by that script — migrations have one owner, and a deployed server has no repository beside it to read `.sql` files from.
+
 ### Running it
+
+Two processes. **The server**, which holds the library:
+
+```bash
+cargo run -p reading-server
+```
+
+It listens on `127.0.0.1:7878` and prints what it found — the database, the dictionary, and the inference server it is configured for. Set `BIND_ADDRESS=0.0.0.0:7878` to accept connections from other machines; loopback is the default because binding every interface is a decision with consequences.
+
+**The application**, in a second terminal:
 
 ```bash
 npm run tauri dev
 ```
 
-The first launch compiles the Rust side and takes a few minutes — `rusqlite` builds SQLite from source. Later launches take seconds. Keep the terminal open; closing it closes the app.
+The first launch compiles Rust and takes a few minutes; later ones take seconds. Keep both terminals open.
 
-Ollama must be running. If it isn't, the app opens and says so rather than failing obscurely.
+The first time you run it, the sign-in screen offers to create an account instead — the first account on a fresh library becomes the administrator, since someone has to be able to set the inference server's address.
+
+Ollama must be running for transcription and coaching. If it isn't, the app says so rather than failing obscurely.
+
+**Environment the server reads**, all optional except the first:
+
+| | |
+|---|---|
+| `DATABASE_URL` | written to `.env` by the setup script |
+| `BIND_ADDRESS` | default `127.0.0.1:7878` |
+| `LIBRARY_DIR` | where page images go, default `./library` |
+| `DICT_PATH` | default `./dict.sqlite` |
 
 ### Building an installer
 
@@ -137,7 +169,7 @@ src-tauri/target/release/bundle/
   deb/  appimage/   Linux
 ```
 
-Install it and the app launches from the Start menu with no terminal. Your library lives in the platform application-data directory — `%APPDATA%\com.rec0n.book-companion` on Windows — **outside** the install, so rebuilding or reinstalling never touches your books, pages, or summaries.
+Install it and the app launches from the Start menu with no terminal. It is only the window: your books, pages, and summaries live in the library server's Postgres database and its `LIBRARY_DIR`, so rebuilding or reinstalling the application never touches them. The app remembers only which server to talk to.
 
 ---
 
@@ -175,11 +207,25 @@ src/
     api.ts                  Every IPC call, typed. Start here.
     theme.ts
 
-src-tauri/src/
-  commands.rs             The whole IPC surface. Thin — logic lives below.
+src-tauri/src/            The window. Holds no logic and no library.
+  commands.rs             Each command is one HTTP call to the server
+  client.rs               The session token lives here, never in the webview
   lib.rs                  Plugin and command registration
 
+crates/reading-server/src/  The library service.
+  routes/
+    accounts.rs             Register, sign in, sign out
+    library.rs              Books, pages, blocks, summaries, outline
+    import.rs               Photographs, EPUB, PDF, web
+    study.rs                The coach and the dictionary
+    images.rs               Page photographs, with a path-traversal guard
+    models.rs               Settings and the inference server
+  auth_layer.rs           Caller and Admin extractors
+  state.rs                Shared state and server settings
+
 crates/reading-core/src/  The engine. No UI, no transport.
+  auth.rs                 argon2id passwords, session tokens
+  db/pg.rs                Postgres, and every ownership check
   models.rs  error.rs
   db/
     mod.rs                  Queries and migrations
@@ -239,6 +285,20 @@ Never edit `schema.sql` alone — that file is only used for a fresh install, an
 
 Migrations run in order on open, so a library from any earlier version upgrades in place. **Test destructive migrations against a copy of a real library first.** The v1→v2 migration rebuilds `pages`, and `blocks` cascade-delete from it — with foreign keys enforced, that would have destroyed every block in the library. There are regression tests pinning exactly that.
 
+### Checking the two boundaries that matter
+
+The database layer and the HTTP layer each have a script that tries to break their isolation. Both create throwaway accounts, attempt every crossing, and clean up after themselves.
+
+```bash
+cargo run -p reading-core --example check-db
+```
+
+```bash
+bash scripts/check-api.sh
+```
+
+They are scripts rather than `cargo test` cases on purpose: both need a live Postgres, and `cargo test` has to pass on a fresh clone that has none. Run them after touching anything in `db/pg.rs`, `auth_layer.rs`, or the routes.
+
 ### Diagnostic tools
 
 Unit tests use fixtures; these run the real thing. Each exists because something failed in a way the tests did not predict.
@@ -252,8 +312,8 @@ cargo run -p reading-core --example check-gutter -- path/to/photo.jpg
 # What an EPUB extracts to: spine, contents, chapters per division
 cargo run -p reading-core --example check-epub -- path/to/book.epub
 
-# The outline the navigator will show, from a real library
-cargo run -p reading-core --example check-outline -- "%APPDATA%/com.rec0n.book-companion/library.sqlite"
+# The database layer, against a real Postgres, including isolation
+cargo run -p reading-core --example check-db
 
 # EPUB / PDF / web extraction
 cargo run -p reading-core --example check-ingest -- <file-or-url>
@@ -269,19 +329,21 @@ gutter  : darkest 113, page 151, ratio 0.751 (need <0.80)
 
 ### Inspecting your library
 
-It is plain SQLite. Nothing is hidden:
+It is plain Postgres. Nothing is hidden:
 
 ```bash
-sqlite3 "$APPDATA/com.rec0n.book-companion/library.sqlite" \
-  "SELECT page_no, kind, substr(text_norm,1,60) FROM blocks
-   JOIN pages ON pages.id = blocks.page_id LIMIT 20;"
+psql "$env:DATABASE_URL" -c "SELECT page_no, kind, substr(text_norm,1,60) FROM blocks JOIN pages ON pages.id = blocks.page_id LIMIT 20;"
 ```
+
+Page images are files under `LIBRARY_DIR`, one directory per book.
 
 ### Changing the models
 
 Day to day, use **Settings** (the gear in the header). It asks the server what it has installed and offers those as dropdowns, so a model you never pulled cannot be chosen by mistake. The two roles that look at an image only list models reporting the `vision` capability.
 
-Defaults, used until you change them, are in `src-tauri/src/ollama/mod.rs`:
+Only an administrator may change them, and the same is true of the inference server's address — that is a URL the *server* then fetches, so an ordinary account able to set it would have server-side request forgery.
+
+Defaults, used until you change them, are in `crates/reading-core/src/ollama/mod.rs`:
 
 ```rust
 pub const DEFAULT_OCR_MODEL: &str = "glm-ocr";
@@ -313,7 +375,7 @@ Loading a model costs 5–10 seconds, so Settings has **Keeping models loaded**:
 
 This is sent with every request, which means it *overrides* `OLLAMA_KEEP_ALIVE` on the server. Setting the environment variable alone does nothing while the app is talking; the setting is the one that decides.
 
-For a hosted or public Ollama-compatible endpoint, fill in the **API key**; it is sent as `Authorization: Bearer …` on every request. Leave it blank for a local server, which wants no authentication at all. The key lives in `library.sqlite` in plain text — that file deserves the same care as the key.
+For a hosted or public Ollama-compatible endpoint, fill in the **API key**; it is sent as `Authorization: Bearer …` on every request. Leave it blank for a local server, which wants no authentication at all. The key is stored in the `settings` table in plain text and is never returned to any client — reading settings tells you only whether one is set.
 
 Changing either takes effect immediately. The HTTP client is rebuilt, not the app restarted, so you can move inference mid-chapter.
 
@@ -384,9 +446,17 @@ npx tsc --noEmit
 
 ---
 
-## Privacy
+## Privacy and access
 
-No account, no telemetry, no cloud inference. Transcription, coaching, and the dictionary are local. The single exception is importing a web page, which fetches the URL you type — and is labelled as such in the interface.
+No telemetry, and no third-party inference. Everything happens on machines you run: the application, the library server, Postgres, and Ollama.
+
+That said, be precise about what "local" means now. If you point the app at a server on another machine — which is the point of the split — then **page images and paragraph text travel to that machine**, and to whatever Ollama the server is configured for. On a LAN that is your own network. Over the internet it is not, which is why `scripts/secure-ollama-wan.ps1` exists and why the server logs a warning when you bind it to a public interface. There is no TLS in the server itself; put a reverse proxy in front before exposing it.
+
+**Accounts are isolated by construction.** `books.user_id` is the only place ownership is recorded, and every query reaches it by joining rather than by a check a new endpoint could forget. Asking for someone else's book reports "not found" rather than "forbidden", because telling those apart confirms the id exists. `scripts/check-api.sh` tries to cross the boundary in every direction and fails the build if any attempt succeeds.
+
+Passwords are argon2id. Session tokens are 256 bits of CSPRNG output, stored as SHA-256 digests — a database read yields no working credentials. The token never enters the webview, because the webview renders imported content and a script hidden in a saved web page could otherwise read it.
+
+The single outbound exception remains importing a web page, which fetches the URL you type and is labelled as such in the interface.
 
 Your photographs are kept alongside the text, because the OCR model silently modernises archaic spelling and ligatures: the image, not the transcription, is the record of what was actually printed.
 

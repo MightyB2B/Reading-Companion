@@ -1,13 +1,19 @@
 [workspace]
 resolver = "2"
-members = ["crates/reading-core", "src-tauri"]
+members = ["crates/reading-core", "crates/reading-server", "src-tauri"]
 
 # Shared so three crates cannot drift onto different versions of rusqlite or
 # reqwest, which would be a linking problem rather than a compile error.
 [workspace.dependencies]
 anyhow = "1.0.104"
+# argon2id for passwords. Deliberately slow and memory-hard: the whole point
+# is that a stolen database cannot be run through a GPU at billions of guesses
+# a second, which is exactly what SHA-256 would allow.
+argon2 = "0.5"
+axum = { version = "0.8", features = ["macros"] }
 base64 = "0.23.1"
 chrono = { version = "0.4.45", features = ["serde"] }
+dotenvy = "0.15"
 epub = "2.1.5"
 futures-util = "0.3.33"
 # Pure-Rust HEIC/HEIF decoder. Chosen over libheif-rs specifically to avoid a
@@ -17,6 +23,7 @@ heic = { version = "0.1.6", features = ["parallel"] }
 image = "0.25.10"
 kamadak-exif = "0.6.1"
 pdf-extract = "0.12.0"
+rand = "0.9"
 # rustls rather than the default native-tls: Ollama may be plain HTTP, but a
 # remote server is HTTPS and rustls avoids a system TLS dependency entirely.
 reqwest = { version = "0.13.4", default-features = false, features = [
@@ -29,9 +36,30 @@ reqwest = { version = "0.13.4", default-features = false, features = [
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 scraper = "0.27.0"
 serde = { version = "1", features = ["derive"] }
+# The Postgres driver directly, not the `sqlx` facade.
+#
+# The facade declares sqlx-sqlite as an optional dependency, and that is
+# enough to break the build even with the feature off: cargo resolves versions
+# before it prunes features, so the `links = "sqlite3"` claim in
+# libsqlite3-sys 0.30 (what sqlx-sqlite wants) collides with 0.38 (what
+# rusqlite wants) during resolution. The dictionary needs rusqlite, so the
+# facade has to go.
+#
+# `macros` is absent for a second reason: the query! family needs a live
+# database at *compile* time, so a fresh clone could not be built without
+# first standing up Postgres. Queries here are checked at runtime.
+sqlx-core = { version = "0.8.6", default-features = false, features = [
+    "_rt-tokio",
+] }
+sqlx-postgres = { version = "0.8.6", default-features = false, features = [
+    "chrono",
+] }
 serde_json = "1"
 sha2 = "0.11.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 reading-core = { path = "crates/reading-core" }

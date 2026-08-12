@@ -5,6 +5,13 @@
 //! single-user desktop application, contention is nil, and a `Connection`
 //! behind a `Mutex` is far simpler to reason about than a pool.
 
+/// The Postgres replacement for this module.
+///
+/// Both exist during the changeover: the server runs on `pg`, and the SQLite
+/// layer below stays because the one-time importer has to read the old file
+/// to get an existing library across.
+pub mod pg;
+
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -992,38 +999,10 @@ impl Db {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BookStats {
-    pub pages: i64,
-    pub paragraphs: i64,
-    /// Paragraphs the reader has summarised.
-    pub summaries: i64,
-    pub words_looked_up: i64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SentenceSummary {
-    pub ordinal: i64,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct VocabEntry {
-    pub word: String,
-    pub lemma: Option<String>,
-    pub count: i64,
-    pub sentence: Option<String>,
-    pub gloss: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SpineEntry {
-    /// Null for a page whose number has not been read yet.
-    pub page_no: Option<i64>,
-    pub ordinal: i64,
-    pub block_id: i64,
-    pub sentence: String,
-}
+// These describe results rather than storage, and both this layer and the
+// Postgres one in `pg` return them, so they are declared once with the other
+// wire types instead of twice here.
+pub use crate::models::{BookStats, SentenceSummary, SpineEntry, VocabEntry};
 
 #[cfg(test)]
 mod tests {

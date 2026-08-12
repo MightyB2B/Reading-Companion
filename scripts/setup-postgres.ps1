@@ -145,7 +145,7 @@ if ($migrations.Count -eq 0) {
 
 Write-Host "Migrations: $($migrations.Count) file(s) in $migrationDir" -ForegroundColor DarkGray
 
-# --- 2. Password -------------------------------------------------------------
+# --- 2. Password generation --------------------------------------------------
 
 function New-Password {
     param([int]$Length = 32)
@@ -174,21 +174,7 @@ function New-Password {
     }
 }
 
-Write-Step "Password"
-$generated = $false
-if (-not $Password) {
-    $Password = New-Password
-    $generated = $true
-    Write-Ok "Generated 32 characters from the OS CSPRNG."
-} else {
-    Write-Warn "Using the password you supplied."
-}
-
-# Doubled for SQL string literals. Generated passwords contain no quotes, but
-# a supplied one might.
-$escaped = $Password.Replace("'", "''")
-
-# --- 3. Create the role and database ----------------------------------------
+# --- 3. Connect, before anything is generated or created --------------------
 
 # Run a statement against the maintenance database as the superuser.
 function Invoke-Super {
@@ -204,9 +190,54 @@ function Invoke-Super {
     return $out
 }
 
+# Checked first, so a wrong password costs a message rather than a half-built
+# database. psql prints the real reason above whatever is said here.
 Write-Step "Checking the server"
-$version = Invoke-Super "SELECT version();"
+$version = & $psql --host $DbHost --port $Port --username $SuperUser `
+    --dbname postgres --no-password --quiet --tuples-only `
+    --set ON_ERROR_STOP=1 --command "SELECT version();"
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Warn "Could not connect as '$SuperUser'. psql said why, just above."
+    Write-Host ""
+    Write-Host "    If it was 'password authentication failed':" -ForegroundColor DarkGray
+    Write-Host "      PGPASSWORD is the password you chose when installing" -ForegroundColor DarkGray
+    Write-Host "      PostgreSQL, not your Windows password. Set it again:" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "        `$env:PGPASSWORD = 'the-installer-password'" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "      Lost it? Reset by trusting local connections briefly:" -ForegroundColor DarkGray
+    Write-Host "        1. Stop-Service postgresql-x64-17" -ForegroundColor Gray
+    Write-Host "        2. In <install>\data\pg_hba.conf, change scram-sha-256" -ForegroundColor Gray
+    Write-Host "           to trust on the 127.0.0.1/32 and ::1/128 lines" -ForegroundColor Gray
+    Write-Host "        3. Start-Service postgresql-x64-17" -ForegroundColor Gray
+    Write-Host "        4. psql -U postgres -c \`"ALTER USER postgres PASSWORD 'new'\`"" -ForegroundColor Gray
+    Write-Host "        5. Put pg_hba.conf back and restart the service" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "    If it was 'could not connect' or 'connection refused':" -ForegroundColor DarkGray
+    Write-Host "      The server is not running. Start-Service postgresql-x64-17" -ForegroundColor DarkGray
+    Write-Host ""
+    throw "Could not connect to PostgreSQL at ${DbHost}:${Port}."
+}
+
 Write-Ok ($version | Select-Object -First 1).ToString().Trim()
+
+# --- 4. Generate the application password -------------------------------------
+
+Write-Step "Password"
+$generated = $false
+if (-not $Password) {
+    $Password = New-Password
+    $generated = $true
+    Write-Ok "Generated 32 characters from the OS CSPRNG."
+} else {
+    Write-Warn "Using the password you supplied."
+}
+
+# Doubled for SQL string literals. Generated passwords contain no quotes, but
+# a supplied one might.
+$escaped = $Password.Replace("'", "''")
 
 if ($Force) {
     Write-Step "Dropping the existing database and role (-Force)"
@@ -248,32 +279,32 @@ if ($dbExists) {
 if ($LASTEXITCODE -ne 0) { throw "Could not grant the public schema to $User." }
 Write-Ok "Granted the public schema."
 
-# --- 4. Apply the migrations -------------------------------------------------
+# --- 5. Apply the migrations -------------------------------------------------
 
-Write-Step "Applying migrations"
+Write-Step "Checking the new role can connect"
 
-# As the new role, so every table is owned by the account the app connects as.
+# The schema is deliberately NOT applied here. Migrations have exactly one
+# owner and it is the application, which runs them on startup: a deployed
+# server has no repository beside it to read .sql files from, and two things
+# applying the same migrations means two sets of bookkeeping that disagree the
+# first time one of them is run alone.
 $superPassword = $env:PGPASSWORD
 try {
     $env:PGPASSWORD = $Password
-    foreach ($m in $migrations) {
-        & $psql --host $DbHost --port $Port --username $User --dbname $Database `
-            --no-password --quiet --set ON_ERROR_STOP=1 --file $m.FullName
-        if ($LASTEXITCODE -ne 0) {
-            throw "Migration failed: $($m.Name)"
-        }
-        Write-Ok $m.Name
+    & $psql --host $DbHost --port $Port --username $User --dbname $Database `
+        --no-password --quiet --command "SELECT 1;" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "The new role could not connect to $Database."
     }
-
-    $tables = & $psql --host $DbHost --port $Port --username $User --dbname $Database `
-        --no-password --quiet --tuples-only `
-        --command "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';"
-    Write-Ok "$(($tables | Out-String).Trim()) tables in place."
+    Write-Ok "$User can connect to $Database."
 } finally {
     $env:PGPASSWORD = $superPassword
 }
 
-# --- 5. Write .env -----------------------------------------------------------
+Write-Host "    The schema is created by the application on first run," -ForegroundColor DarkGray
+Write-Host "    from $($migrations.Count) migration(s) embedded in the binary." -ForegroundColor DarkGray
+
+# --- 6. Write .env -----------------------------------------------------------
 
 Write-Step "Writing .env"
 
@@ -315,7 +346,7 @@ if (-not $ignored) {
     Write-Ok "Added .env to .gitignore."
 }
 
-# --- 6. Report ---------------------------------------------------------------
+# --- 7. Report ---------------------------------------------------------------
 
 Write-Host ""
 Write-Host "  ------------------------------------------------------------" -ForegroundColor Green
