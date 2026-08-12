@@ -44,6 +44,19 @@
     CIDR allowed through the firewall. Detected when omitted. 'none' installs
     without opening the port at all.
 
+.PARAMETER PublicName
+    The hostname this server is reached by from outside, e.g.
+    library.example.org. Puts that name in the certificate, opens the port to
+    any address rather than to your subnet alone, and refuses to finish while
+    the library is still empty -- an internet-facing server that accepts the
+    first comer hands them the administrator account.
+
+    Only give this if you mean to expose the server to the internet.
+
+.PARAMETER RegenerateCertificate
+    Replace an existing certificate. Every reader who trusted the old one will
+    have to trust the new one.
+
 .PARAMETER SuperUserPassword
     PostgreSQL's superuser password, if it is already installed and you know
     it. Taken from $env:PGPASSWORD when omitted. Not needed at all when this
@@ -91,7 +104,9 @@ param(
     [switch]$SkipPostgresInstall,
     [switch]$SkipRustInstall,
     [switch]$SkipDictBuild,
-    [switch]$NoTls
+    [switch]$NoTls,
+    [string]$PublicName,
+    [switch]$RegenerateCertificate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -737,7 +752,32 @@ if ($NoTls) {
 } else {
     Write-Head "TLS"
 
-    if ((Test-Path $certPem) -and (Test-Path $keyPem)) {
+    # An existing certificate is kept, because replacing it makes every reader
+    # who trusted the old one trust the new one by hand. Unless it does not
+    # cover the name this server is now reached by, in which case keeping it
+    # means TLS that cannot validate.
+    $certCoversName = $true
+    if ((Test-Path $certPem) -and $PublicName) {
+        try {
+            $pemText = Get-Content $certPem -Raw
+            $b64 = ($pemText -split "`n" | Where-Object { $_ -notmatch '-----' }) -join ''
+            $existing = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
+                ,[Convert]::FromBase64String($b64.Trim()))
+            $sans = ($existing.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.17' } |
+                ForEach-Object { $_.Format($false) }) -join ' '
+            $certCoversName = $sans -like "*$PublicName*"
+            if (-not $certCoversName) {
+                Write-Hmm "The existing certificate does not cover $PublicName"
+                Write-Note "It was issued for: $sans"
+                Write-Note "Replacing it. Readers will have to trust the new one."
+            }
+        } catch {
+            Write-Hmm "Could not read the existing certificate; replacing it"
+            $certCoversName = $false
+        }
+    }
+
+    if ((Test-Path $certPem) -and (Test-Path $keyPem) -and $certCoversName -and -not $RegenerateCertificate) {
         Write-Ok "Certificate already present; keeping it"
         Write-Note "Readers who trusted it stay trusting it."
         $useTls = $true
@@ -746,7 +786,11 @@ if ($NoTls) {
         # for 192.168.x.x. The client is given this exact certificate to
         # trust, which is a stronger guarantee than a public CA anyway: only
         # this server can present it.
+        # The public name first: it is the one that has to validate, and a
+        # certificate missing it is a certificate the application will refuse
+        # however carefully it was trusted.
         $names = @()
+        if ($PublicName) { $names += $PublicName }
         if ($lan) { $names += $lan.IPAddress }
         $names += $env:COMPUTERNAME
         $names += 'localhost'
@@ -878,9 +922,37 @@ $ruleName = "Reading Companion ($Port)"
 $old = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
 if ($old) { Remove-NetFirewallRule -DisplayName $ruleName }
 
-if ($Loopback -or $Subnet -eq 'none' -or -not $Subnet) {
+if ($Loopback -or $Subnet -eq 'none' -or (-not $Subnet -and -not $PublicName)) {
     Write-Ok "No rule added; the port is not reachable from the network"
 } else {
+    # The profile is read from the adapter rather than assumed. A rule written
+    # for Private and Domain does nothing at all on a machine whose network is
+    # categorised Public -- and Windows categorises a server's ethernet as
+    # Public by default. The rule looks right, reports success, and silently
+    # blocks everything, which is a worse failure than not adding it.
+    $categories = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty NetworkCategory -Unique)
+
+    $profileNames = @()
+    foreach ($c in $categories) {
+        switch ("$c") {
+            'Public'              { $profileNames += 'Public' }
+            'Private'             { $profileNames += 'Private' }
+            'DomainAuthenticated' { $profileNames += 'Domain' }
+        }
+    }
+    if ($profileNames.Count -eq 0) { $profileNames = @('Private', 'Domain') }
+
+    if ($PublicName) {
+        # Reachable from the internet by intent: no subnet can describe where
+        # a request will come from, and no profile can be assumed.
+        $remote = 'Any'
+        $ruleProfile = 'Any'
+    } else {
+        $remote = $Subnet
+        $ruleProfile = ($profileNames | Select-Object -Unique) -join ','
+    }
+
     $rule = @{
         DisplayName   = $ruleName
         Description   = 'Reading Companion library server'
@@ -888,12 +960,22 @@ if ($Loopback -or $Subnet -eq 'none' -or -not $Subnet) {
         Action        = 'Allow'
         Protocol      = 'TCP'
         LocalPort     = $Port
-        RemoteAddress = $Subnet
-        Profile       = 'Private,Domain'
+        RemoteAddress = $remote
+        Profile       = $ruleProfile
     }
     New-NetFirewallRule @rule | Out-Null
-    Write-Ok "TCP $Port open to $Subnet on private and domain networks"
-    Write-Note "Public networks stay closed."
+
+    if ($PublicName) {
+        Write-Ok "TCP $Port open to ANY address, on every network profile"
+        Write-Note "This server is meant to be reachable from the internet."
+    } else {
+        Write-Ok "TCP $Port open to $remote on: $ruleProfile"
+        Write-Note "This machine's network is categorised: $($categories -join ', ')"
+        if ($categories -contains 'Public') {
+            Write-Note "That includes Public, so the rule covers it -- otherwise it"
+            Write-Note "would have been silently inert."
+        }
+    }
 }
 
 # =============================================================================
@@ -974,11 +1056,48 @@ if ($setup.needs_setup) {
     Write-Ok "The library already has accounts"
 }
 
+# An empty library accepts the first account, and the first account is the
+# administrator. On a LAN that is a convenience. Reachable from the internet
+# it is a race you can lose to anyone who finds the port, so the installer
+# will not walk away from it quietly.
+if ($PublicName -and $setup.needs_setup) {
+    Write-Host ""
+    Write-Host "  ############################################################" -ForegroundColor Red
+    Write-Host "  #  THIS SERVER IS OPEN AND EMPTY, RIGHT NOW                #" -ForegroundColor Red
+    Write-Host "  ############################################################" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  It is reachable from the internet and has no accounts, so" -ForegroundColor Red
+    Write-Host "  the first person to reach it becomes the administrator --" -ForegroundColor Red
+    Write-Host "  and the administrator can point it at any inference server." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Create your account NOW, before anything else:" -ForegroundColor Yellow
+    Write-Host "      $scheme`://$PublicName`:$Port" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Registration closes by itself the moment it exists. Confirm" -ForegroundColor Yellow
+    Write-Host "  with:" -ForegroundColor Yellow
+    Write-Host "      curl -k $scheme`://$PublicName`:$Port/api/setup-state" -ForegroundColor Gray
+    Write-Host "  and look for registration_open:false" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  If you would rather close the door first, stop the service" -ForegroundColor DarkGray
+    Write-Host "  and start it once you are ready to register:" -ForegroundColor DarkGray
+    Write-Host "      Stop-Service $ServiceName" -ForegroundColor Gray
+    Write-Host ""
+} elseif ($PublicName) {
+    # Reachable from the internet, so say plainly what is holding the door.
+    Write-Ok "Registration is closed; existing accounts only"
+}
+
 # =============================================================================
 # 9. Report
 # =============================================================================
 
-$address = if ($lan -and -not $Loopback) { "${scheme}://$($lan.IPAddress):$Port" } else { "${scheme}://127.0.0.1:$Port" }
+$address = if ($PublicName) {
+    "${scheme}://${PublicName}:$Port"
+} elseif ($lan -and -not $Loopback) {
+    "${scheme}://$($lan.IPAddress):$Port"
+} else {
+    "${scheme}://127.0.0.1:$Port"
+}
 
 Write-Host ""
 Write-Host "  ------------------------------------------------------------" -ForegroundColor Green
