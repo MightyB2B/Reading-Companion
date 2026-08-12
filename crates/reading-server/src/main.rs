@@ -57,14 +57,47 @@ fn load_env() -> Vec<String> {
     }
 
     if let Ok(path) = dotenvy::dotenv() {
-        loaded.push(path.display().to_string());
+        let path = path.display().to_string();
+        // Running the binary from its own install directory finds the same
+        // file twice, and reporting it twice reads like a misconfiguration.
+        if !loaded.contains(&path) {
+            loaded.push(path);
+        }
     }
 
     loaded
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+#[cfg(windows)]
+mod service;
+
+/// Start, either in the foreground or under the Service Control Manager.
+///
+/// Not `#[tokio::main]`, because a Windows service cannot begin by building a
+/// runtime: the SCM gives a service about thirty seconds to call back and
+/// identify itself, and a process that has not done so is killed. So the
+/// handshake happens first and the runtime is built inside it.
+fn main() -> anyhow::Result<()> {
+    // Under the SCM this never returns until the service stops. Run from a
+    // terminal it reports that there is no service to attach to, and we carry
+    // on as an ordinary program.
+    #[cfg(windows)]
+    if service::run_if_launched_by_windows()? {
+        return Ok(());
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(serve(std::future::pending::<()>()))
+}
+
+/// Everything the server does, from configuration to listening.
+///
+/// Takes the thing that will end it: a future that resolves when it is time
+/// to stop. In the foreground that is never — Ctrl-C kills the process — and
+/// under the SCM it resolves when Windows asks the service to stop.
+pub async fn serve(shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> anyhow::Result<()> {
     let env_files = load_env();
 
     tracing_subscriber::fmt()
@@ -180,7 +213,18 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("listening on https://{addr}");
             tracing::info!(certificate = %cert, "TLS enabled");
 
+            // axum-server has no graceful-shutdown signal of its own, so the
+            // handle is what the stop request reaches in.
+            let handle = axum_server::Handle::new();
+            let stopping = handle.clone();
+            tokio::spawn(async move {
+                shutdown.await;
+                tracing::info!("stopping");
+                stopping.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+            });
+
             axum_server::bind_rustls(addr, config)
+                .handle(handle)
                 .serve(app.into_make_service())
                 .await?;
         }
@@ -204,7 +248,12 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
 
-            axum::serve(listener, app).await?;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    shutdown.await;
+                    tracing::info!("stopping");
+                })
+                .await?;
         }
     }
 

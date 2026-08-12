@@ -19,9 +19,14 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 anyhow = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 dotenvy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-base64 = { workspace = true }
 sha2 = { workspace = true }
+
+# The Service Control Manager handshake, and nothing else needs it. A console
+# binary registered with sc.exe is killed for never performing it.
+[target.'cfg(windows)'.dependencies]
+windows-service = { workspace = true }

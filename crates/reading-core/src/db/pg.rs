@@ -116,6 +116,8 @@ impl Db {
         .await
         .map_err(to_app_error)?;
 
+        self.adopt_existing_schema().await?;
+
         for (name, sql) in MIGRATIONS {
             let already = crate::sqlx::query("SELECT 1 FROM schema_migrations WHERE name = $1")
                 .bind(name)
@@ -144,6 +146,47 @@ impl Db {
                 .map_err(to_app_error)?;
 
             tx.commit().await.map_err(to_app_error)?;
+        }
+
+        Ok(())
+    }
+
+    /// Recognise a database whose schema was applied by something other than
+    /// this code, and record the first migration as done rather than trying
+    /// to build tables that are already there.
+    ///
+    /// Early versions of `setup-postgres.ps1` ran the .sql file with psql,
+    /// before migrations were given a single owner. A database created that
+    /// way has every table and no bookkeeping, so the server would try the
+    /// first migration on every start and fail with `relation "users" already
+    /// exists` — a message that says nothing about what to do.
+    ///
+    /// Deliberately narrow. It fires only when the bookkeeping table is
+    /// completely empty *and* the schema is plainly present, and it adopts
+    /// only the first migration; anything added later still runs normally.
+    async fn adopt_existing_schema(&self) -> Result<()> {
+        let Some((first, _)) = MIGRATIONS.first() else {
+            return Ok(());
+        };
+
+        let row = crate::sqlx::query(
+            "SELECT
+               (SELECT count(*) FROM schema_migrations) AS recorded,
+               (to_regclass('public.users') IS NOT NULL) AS has_schema",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(to_app_error)?;
+
+        let recorded: i64 = row.get("recorded");
+        let has_schema: bool = row.get("has_schema");
+
+        if recorded == 0 && has_schema {
+            crate::sqlx::query("INSERT INTO schema_migrations (name) VALUES ($1)")
+                .bind(first)
+                .execute(&self.pool)
+                .await
+                .map_err(to_app_error)?;
         }
 
         Ok(())
