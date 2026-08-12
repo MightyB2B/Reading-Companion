@@ -4,6 +4,12 @@
 //! the database after a real import, which is where the chapter-title problem
 //! showed up in the first place.
 //!
+//! **Reads the old SQLite library**, which nothing produces any more — the
+//! library moved to Postgres. Kept because the importer that will bring an
+//! existing SQLite library across has not been written yet, and this is how
+//! you look inside one in the meantime. For a current library, use
+//! `check-db`, or the outline endpoint on a running server.
+//!
 //! Usage: cargo run --example check-outline -- <path-to-library.sqlite>
 
 use reading_core::db::Db;

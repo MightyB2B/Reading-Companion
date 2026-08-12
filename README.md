@@ -66,15 +66,202 @@ For EPUBs, the file's own table of contents is used, walked recursively — a re
 
 ## Getting started
 
-### Prerequisites
+There are two pieces, and they need not be the same machine:
+
+- **The server** holds your books, pages, and summaries, and does the model work. Set it up once, on whatever has the GPU.
+- **The application** is what you read in. Install it on each machine you read on.
+
+Three paths through this, depending on what you are doing:
+
+| | |
+|---|---|
+| **[Set up a server](#set-up-a-server)** | once, on the machine that will hold the library |
+| **[Install the application](#install-the-application)** | on each machine you read on |
+| **[Run both from source](#developing)** | working on the project itself |
+
+If it is all one machine, do the first two on it — the server on loopback and the application talking to `127.0.0.1`.
+
+---
+
+## Set up a server
+
+### What it needs
+
+Only two things, and the installer handles the rest:
+
+| | | why |
+|---|---|---|
+| **Windows** | 10, 11, or Server | the scripts are PowerShell |
+| **[Ollama](https://ollama.com)** | running, with models pulled | transcription and coaching |
+
+**PostgreSQL is installed for you** if it is missing, with a password the installer generates. So is Rust, if you run the installer from a checkout and want it to build the server itself.
+
+Pull the models on the machine Ollama runs on — about 8GB, once:
+
+```bash
+ollama pull glm-ocr; ollama pull qwen3:4b; ollama pull qwen3-vl:4b
+```
+
+`scripts/setup-ollama-server.ps1` does that and tunes Ollama for a dedicated box (keeps models resident, one slot, binds the network). Ollama itself needs **no** firewall rule and no exposure: the only thing that talks to it is the library server, usually on the same machine.
+
+### Install it
+
+Copy **three files** to the server, into one directory:
+
+```
+scripts/install-server.ps1
+target/release/reading-server.exe
+src-tauri/resources/dict.sqlite
+```
+
+Build those two artefacts on a machine that has Rust and Node:
+
+```bash
+cargo build --release -p reading-server; npm run dict:build
+```
+
+Then, on the server, from an **elevated** PowerShell:
+
+```bash
+powershell -ExecutionPolicy Bypass -File .\install-server.ps1
+```
+
+That is the whole thing. It installs PostgreSQL if missing, creates the role and database, generates a TLS certificate, installs into `C:\ReadingCompanion`, opens the port to your subnet only, registers a service that starts automatically and restarts on failure, and checks the result answers before claiming success. The address it prints is what goes into the application.
+
+Both generated passwords are written to files readable only by Administrators. You never type either one.
+
+**Nothing is changed until every check passes** — elevation, the files, the port — and a failure prints the whole list rather than stopping at the first. Safe to re-run: an existing database is left alone unless you pass `-Fresh`, and the service is replaced rather than duplicated.
+
+If you have a checkout on the server, you need copy nothing: it builds the binary and the dictionary itself, installing the Rust toolchain first if that is missing too.
+
+```bash
+git clone https://github.com/MightyB2B/Reading-Companion.git
+cd Reading-Companion; .\scripts\install-server.ps1
+```
+
+Slower — the toolchain is several GB and the first build takes minutes — but there is nothing to carry across.
+
+Useful switches:
+
+| | |
+|---|---|
+| `-Subnet 192.168.4.0/24` | who may reach the port; detected otherwise |
+| `-Port 7878` | default |
+| `-Loopback` | this machine only, no firewall rule |
+| `-Fresh` | **drops the existing database** and starts over |
+| `-NoTls` | plaintext; only sensible behind something else |
+| `-SkipRustInstall` `-SkipDictBuild` | do not install or build those |
+
+If PostgreSQL was already installed, it needs its superuser password — `$env:PGPASSWORD = '…'` before running, or `scripts/reset-postgres-password.ps1` if it has been lost.
+
+`setup-postgres.ps1` and `deploy-server.ps1` do the two halves separately, for when you want one without the other. `install-server.ps1` calls neither; it is self-contained, which is why it is the only script you have to copy.
+
+### Trusting its certificate
+
+The connection is encrypted, and the server terminates TLS itself — no reverse proxy. The certificate is self-signed, because no public authority will sign for `192.168.x.x`, so each reading machine has to be told to trust that one certificate.
+
+Copy `server-cert.pem` (left beside the installer) to the reading machine, then use **Trust a certificate…** on the sign-in screen. Once, not every launch.
+
+That is a stronger guarantee than a public authority, not a weaker one: only your server can present that certificate. Accepting *any* certificate instead would let anything on the network impersonate your library and read everything you read, which is why the application will not do it.
+
+The certificate is public by design. The private key never leaves the server.
+
+To check a server before trusting it:
+
+```bash
+cargo run -p reading-core --example check-tls -- https://192.168.4.252:7878 server-cert.pem
+```
+
+That uses the same client the application does and reports both halves — refused *without* the certificate, accepted with it. Windows `curl` cannot answer this: it uses schannel, which ignores `--cacert` and fails either way.
+
+### Accounts
+
+**There is no default account.** A shipped username and password is a backdoor, and one nobody remembers to change. The first time you connect, the sign-in screen offers to *create* one — and that first account on an empty library becomes the administrator, since someone has to be able to set the inference server's address.
+
+Registration then closes behind it. To let someone else join, turn on **Settings → Who may join**, have them register, and turn it off again; accounts made that way are ordinary, not administrators. It is off by default because a server on a network would otherwise stay an open signup form forever — and an empty library always accepts its first account, so leaving it off can never lock you out of a new one.
+
+Each account's books are private to it. Nothing you write is visible to anyone else with an account on the same server.
+
+### Removing it
+
+Always look first. This changes nothing:
+
+```bash
+.\scripts\uninstall-server.ps1 -DryRun
+```
+
+It reports what it found and what the database holds — *"3 books, 412 pages, 96 summaries, written by 2 accounts"* — because that is the honest way to say what deleting it costs. Pages can be re-imported from the originals; a summary is work you did by hand and nothing regenerates it.
+
+To go through with it:
+
+```bash
+.\scripts\uninstall-server.ps1 -Backup C:\library-backup.sql
+```
+
+Removed: the service, `C:\ReadingCompanion`, the page photographs, the firewall rule, the database, and the role. It asks you to type `REMOVE` first — a y/n keystroke is too easy to hit by accident for something irreversible.
+
+**The backup runs before the confirmation, and on a dry run too.** A backup nobody has watched work is not a backup, and after the database has gone is the wrong moment to discover `pg_dump` is missing. So `-DryRun -Backup <path>` produces a real dump you can inspect while everything is still there. Restore it with `psql -d <database> -f <path>`.
+
+| | |
+|---|---|
+| `-RemovePostgres` | uninstall PostgreSQL too; other things may use it |
+| `-RemoveOllama` | uninstall Ollama and delete its models — several GB to fetch again |
+| `-KeepLibrary` | move the page photographs aside instead of deleting them |
+| `-KeepDatabase` | remove the service and files only |
+
+The application is a separate program: uninstall it from **Add or Remove Programs** on the machine you read on.
+
+---
+
+## Install the application
+
+### From an installer
+
+```bash
+npm run tauri build
+```
+
+A full release build — a couple of minutes once the dependencies are compiled. Both Windows bundles land in `target/release/bundle/`, at the **repository root** rather than under `src-tauri/`, because the cargo workspace shares one target directory:
+
+```
+target/release/bundle/
+  msi/    book-companion_0.1.0_x64_en-US.msi     25 MB   Windows Installer
+  nsis/   book-companion_0.1.0_x64-setup.exe     19 MB   setup executable
+```
+
+Either will do. The `.msi` is the one to use for anything managed — it uninstalls cleanly through Add or Remove Programs and can be deployed by policy. On macOS and Linux the same command produces `dmg/`, `deb/`, and `appimage/` instead.
+
+For just one bundle, which skips the others:
+
+```bash
+npm run tauri build -- --bundles msi
+```
+
+Install it and the application launches from the Start menu with no terminal. It is only the window: your books live in the server's database and its `LIBRARY_DIR`, so reinstalling or rebuilding it never touches them. It remembers only which server to talk to and which certificate to trust.
+
+The version in the filename comes from `version` in `src-tauri/tauri.conf.json`. Windows Installer identifies a product by that and the `identifier`, so bump it before building an installer meant to upgrade an existing one — a same-version `.msi` will refuse to install over itself.
+
+### First run
+
+Enter the address the server printed — `https://192.168.4.252:7878`, or `http://127.0.0.1:7878` if it is the same machine. If the server made its own certificate, choose **Trust a certificate…** and pick the `server-cert.pem` you copied across.
+
+Then sign in, or create the first account if the library is empty.
+
+---
+
+## Developing
+
+### Everything from source
+
+Running both halves yourself needs more than deploying does:
 
 | | | verify with |
 |---|---|---|
 | [Node.js](https://nodejs.org) | 20 or later | `node --version` |
 | [Rust](https://rustup.rs) | stable toolchain | `rustc --version` |
-| [Ollama](https://ollama.com) | running somewhere | `ollama --version` |
 | [PostgreSQL](https://www.postgresql.org) | 15 or later | `psql --version` |
-| C++ build tools | see below | `rustc --print target-list` succeeds |
+| [Ollama](https://ollama.com) | running somewhere | `ollama --version` |
+| C++ build tools | see below | `cargo build` succeeds |
 
 **On Windows**, Rust needs the MSVC toolchain: install **Visual Studio Build Tools** with the *Desktop development with C++* workload and a Windows SDK. `rustup` picks it up automatically. WebView2 already ships with Windows 11.
 
@@ -112,7 +299,7 @@ It prints its own sanity checks and fails loudly if any of them break:
   ✓ publick   -> public (curated archaic spelling)
 ```
 
-The database is **not** committed — it is regenerable, and 40MB of derived data does not belong in a repository. The app runs without it: hyphenation falls back to a case heuristic and word lookup is unavailable, but nothing breaks.
+The database is **not** committed — it is regenerable, and 40MB of derived data does not belong in a repository. The **server** is what loads it, so this is the file you copy to a deployed one. Everything works without it: hyphenation falls back to a case heuristic and word lookup is unavailable, but nothing breaks.
 
 Create the library database. This makes a Postgres role and database and writes the connection string to `.env`:
 
@@ -138,13 +325,11 @@ It listens on `127.0.0.1:7878` and prints what it found — the database, the di
 npm run tauri dev
 ```
 
-The first launch compiles Rust and takes a few minutes; later ones take seconds. Keep both terminals open.
+The first launch compiles Rust and takes a few minutes; later ones take seconds. Keep both terminals open — closing either closes that half.
 
-**There is no default account.** A shipped username and password is a backdoor, and one nobody remembers to change. Instead, the first time you run it the sign-in screen offers to *create* an account — and that first account on an empty library becomes the administrator, since someone has to be able to set the inference server's address.
+On first run it will offer to create an account, since a fresh database has none. See [Accounts](#accounts).
 
-Registration then closes behind it. To let somebody else join, turn on **Settings → Who may join**, have them register, and turn it off again; accounts created that way are ordinary, not administrators. It is off by default because a server reachable from a network would otherwise stay an open signup form forever — but an empty library always accepts its first account, so leaving it off can never lock you out of a new one.
-
-Ollama must be running for transcription and coaching. If it isn't, the app says so rather than failing obscurely.
+Ollama must be running for transcription and coaching. If it isn't, the application says so rather than failing obscurely.
 
 **Environment the server reads**, all optional except the first:
 
@@ -154,116 +339,41 @@ Ollama must be running for transcription and coaching. If it isn't, the app says
 | `BIND_ADDRESS` | default `127.0.0.1:7878` |
 | `LIBRARY_DIR` | where page images go, default `./library` |
 | `DICT_PATH` | default `./dict.sqlite` |
+| `TLS_CERT` `TLS_KEY` | PEM files. Both or neither; one alone is refused rather than silently serving plaintext |
+| `RUST_LOG` | e.g. `reading_server=debug` |
 
-### Putting the server on another machine
+It reads `.env` from beside its own binary *and* from the working directory, and logs which files it used — so a deployed server finds its configuration even though a Windows service starts in `system32`.
 
-The point of the split: the server runs on the box with the GPU, and you read on whatever is to hand.
-
-**One script, and it installs its own dependencies.** No Rust toolchain on the server. Build the two artefacts on your development machine:
-
-```bash
-cargo build --release -p reading-server
-```
-```bash
-npm run dict:build
-```
-
-Copy **three files** to the server, into one directory:
-
-```
-scripts/install-server.ps1
-target/release/reading-server.exe
-src-tauri/resources/dict.sqlite
-```
-
-Then, from an **elevated** PowerShell there:
+In development the dictionary is where the build script puts it, so either set `DICT_PATH` or run with it inline:
 
 ```bash
-powershell -ExecutionPolicy Bypass -File .\install-server.ps1
+DICT_PATH=./src-tauri/resources/dict.sqlite cargo run -p reading-server
 ```
 
-That is the whole thing. It installs PostgreSQL if it is missing — generating the superuser password itself, so there is nothing to invent or remember — creates the role and database with a second generated password, installs into `C:\ReadingCompanion`, writes the configuration, opens the port to your subnet only, registers a service that starts automatically and restarts on failure, and checks the result actually answers before claiming success. The address it prints is what goes into the application's sign-in screen.
+Quote any path containing backslashes in a `.env` file — `LIBRARY_DIR='C:\path\library'`. Unquoted, the dotenv format reads them as escapes and the line silently fails to parse, taking every line after it with it.
 
-Both generated passwords are saved to files readable only by Administrators. You never type either one.
-
-Every check runs **before** anything is changed — elevation, the files, the port — and a failure prints the whole list rather than stopping at the first. Safe to re-run: an existing database is left alone unless you pass `-Fresh`, and the service is replaced rather than duplicated.
-
-If PostgreSQL is already installed, it needs its superuser password: `$env:PGPASSWORD = '…'` before running, or `reset-postgres-password.ps1` if it has been lost.
-
-`setup-postgres.ps1` and `deploy-server.ps1` still exist and do the two halves separately, for when you want one without the other. `install-server.ps1` does not call them — it is self-contained, so it is the only file you need to copy.
-
-The server's configuration lives in `.env` beside the binary, readable only by Administrators. That is deliberate: a Windows service starts in `system32` rather than where it was installed, so it can only find configuration next to itself — and the alternative, machine-wide environment variables, would put the database password where every account on the box can read it.
-
-**The connection is encrypted.** The installer generates a certificate and the server terminates TLS itself — no reverse proxy. It is self-signed, because no public authority will sign a certificate for `192.168.x.x`, so the reading machine has to be told to trust that one certificate. Copy `server-cert.pem` (which the installer leaves beside itself) to the reading machine and use **Trust a certificate…** on the sign-in screen. Once, not every launch.
-
-That is a stronger guarantee than a public certificate authority, not a weaker one: only your server can present that certificate. The alternative — accepting any certificate — would let anything on the network impersonate your library and read everything you read, which is why the application will not do it.
-
-The certificate is public by design; the private key never leaves the server and is readable only by Administrators.
-
-To check a server before trusting it from the app:
-
-```bash
-cargo run -p reading-core --example check-tls -- https://192.168.4.252:7878 server-cert.pem
-```
-
-That uses the same client the application does, and reports both halves: that the connection is refused *without* the certificate, and accepted with it. Windows `curl` cannot answer this — it uses schannel, which ignores `--cacert`.
-
-### Removing the server
-
-```bash
-.\scripts\uninstall-server.ps1 -DryRun
-```
-
-That takes an inventory and changes nothing. It reports what it found and, crucially, what the database holds — *"3 books, 412 pages, 96 summaries, written by 2 accounts"* — because that is the honest way to say what deleting it costs.
-
-To go through with it:
-
-```bash
-.\scripts\uninstall-server.ps1 -Backup C:\library-backup.sql
-```
-
-It removes the service, the install directory, the page photographs, the firewall rule, the database, and the role. It asks you to type `REMOVE` first — a y/n keystroke is too easy to make by accident.
-
-**The backup runs before the confirmation, and on a dry run too.** A backup you have not seen work is not a backup, and the moment to discover `pg_dump` is missing is not after the database has gone. Run with `-DryRun -Backup <path>` to produce a real dump and inspect it before committing to anything.
-
-Left alone unless you ask: PostgreSQL (`-RemovePostgres`), since other things may use it, and Ollama with its models (`-RemoveOllama`), since that is several GB to download again. `-KeepLibrary` rescues the page photographs; `-KeepDatabase` removes the service and files only.
-
-The desktop application is a separate program — uninstall it from Add or Remove Programs on the machine you read on.
-
-### Building an installer
-
-```bash
-npm run tauri build
-```
-
-A full release build, several minutes. The installer lands in:
-
-```
-src-tauri/target/release/bundle/
-  msi/      Windows .msi
-  nsis/     Windows .exe setup
-  dmg/      macOS
-  deb/  appimage/   Linux
-```
-
-Install it and the app launches from the Start menu with no terminal. It is only the window: your books, pages, and summaries live in the library server's Postgres database and its `LIBRARY_DIR`, so rebuilding or reinstalling the application never touches them. The app remembers only which server to talk to.
-
----
-
-## Developing
 
 ### The edit–run loop
 
 With `npm run tauri dev` running:
 
 - **Anything under `src/`** (TypeScript, CSS) hot-reloads. The window updates without losing state.
-- **Anything under `src-tauri/src/`** (Rust) triggers a rebuild and relaunches the window. Ten to thirty seconds.
+- **Anything under `src-tauri/src/` or `crates/`** (Rust) triggers a rebuild and relaunches the window. Ten to thirty seconds.
 
-Two checks worth running before you consider a change done:
+The server does **not** reload itself. Restart `cargo run -p reading-server` after changing anything under `crates/`.
+
+Before you consider a change done:
 
 ```bash
-npx tsc --noEmit                # frontend types
-cd src-tauri && cargo test      # 196 tests
+npx tsc --noEmit                                    # frontend types
+cargo test --workspace                              # 215 tests
+```
+
+And if you touched `db/pg.rs`, `auth_layer.rs`, or anything under `routes/`, the two that need a live database as well:
+
+```bash
+cargo run -p reading-core --example check-db
+bash scripts/check-api.sh
 ```
 
 ### Where things live
@@ -394,6 +504,9 @@ cargo run -p reading-core --example check-db
 
 # EPUB / PDF / web extraction
 cargo run -p reading-core --example check-ingest -- <file-or-url>
+
+# TLS: refused without the certificate, accepted with it
+cargo run -p reading-core --example check-tls -- https://host:7878 server-cert.pem
 ```
 
 `check-gutter` prints the numbers, not just the verdict, which is what makes a threshold arguable:
@@ -462,29 +575,61 @@ Changing either takes effect immediately. The HTTP client is rebuilt, not the ap
 
 ### Troubleshooting
 
-**`Port 1420 is already in use`** — a dev server from a previous run survived.
+#### Connecting
+
+**"Nothing answered there"** on the sign-in screen — the address is wrong or the server is not running. On the server: `Get-Service reading-server`. If it is stopped, run the binary in the foreground to see why, since a service that fails to start says nothing useful in the event log:
 
 ```bash
-npx kill-port 1420
+& C:\ReadingCompanion\reading-server.exe
 ```
 
-**`failed to remove file book-companion.exe: Access is denied`** — the app is still running and holding its own binary. Close the window, or:
+**An `https` address will not connect** — usually the certificate. Copy `server-cert.pem` across and use **Trust a certificate…**. To confirm before trusting it:
 
 ```bash
-taskkill /IM book-companion.exe /F
+cargo run -p reading-core --example check-tls -- https://your-server:7878 server-cert.pem
 ```
 
-**"Ollama is not running"** in the app header — start it with `ollama serve`, then reload. The badge turns green when both models are present.
+Windows `curl` cannot diagnose this: it uses schannel, which ignores `--cacert` and fails whether or not the certificate is good.
 
-**"models are missing"** — the header names them and gives the `ollama pull` command.
+**"that file does not contain a certificate"** — you picked `server-key.pem`. The certificate is the other one; the key never leaves the server.
 
-**"rejected the API key"** when testing a server — the server is reachable, so the network is fine. Check the key, or clear it if the server does not want one.
+**"this library is not accepting new accounts"** — registration is closed, which is the default once the first account exists. An administrator turns it on in **Settings → Who may join**.
 
-**Dictionary lookups do nothing** — `dict.sqlite` was never built. Run `npm run dict:build`. The app logs `dictionary unavailable` on startup when it is absent.
+#### The server
+
+**`DATABASE_URL is not set`** — the server found no `.env`. It reads one beside its own binary and one in the working directory, and logs which. A service starts in `system32`, so for a deployed server it must be the one in `C:\ReadingCompanion`.
+
+**`could not create the library directory at library`** — `LIBRARY_DIR` was not read, so it fell back to a relative path under `system32`. Almost always an unquoted Windows path in `.env`: backslashes are read as escapes and break the line. Quote it — `LIBRARY_DIR='C:\ReadingCompanion\library'`.
+
+**`password authentication failed for user "postgres"`** — that is the password you set when installing PostgreSQL, not your Windows password. `scripts/reset-postgres-password.ps1` recovers it. Note the address in the error: `::1` is IPv6, and changing only the IPv4 line in `pg_hba.conf` is the usual reason a fix appears not to work.
+
+#### Models
+
+**"Ollama is not running"** in the header — start it with `ollama serve` on whichever machine the server points at. The header says nothing when everything is fine.
+
+**"models are missing"** — the header names them and gives the `ollama pull` command. Settings only offers models the server actually has, so this means they were removed after being chosen.
+
+**Dictionary lookups do nothing** — `dict.sqlite` is missing on the *server*. It logs `dictionary unavailable` at startup. Build it with `npm run dict:build` and copy it into the install directory.
+
+**"rejected the API key"** — only applies when the server points at a hosted Ollama. A local one wants no key at all.
+
+#### Building
+
+**`Port 1420 is already in use`** — a dev server from a previous run survived: `npx kill-port 1420`.
+
+**`failed to remove file ...exe: Access is denied`** — something is still running and holding its own binary:
+
+```bash
+taskkill /IM book-companion.exe /F; taskkill /IM reading-server.exe /F
+```
+
+**Vite dies with `EBUSY` watching `target`** — `vite.config.ts` must ignore `**/target/**`. The cargo workspace puts it at the repository root, where Vite would otherwise try to watch the executable cargo is linking.
+
+**First `cargo` build is very slow** — `rusqlite` compiles SQLite from source and Tauri is a large dependency tree. Once. Later builds are incremental.
 
 **npm warns about `allow-scripts` / esbuild** — npm 11 blocks postinstall scripts. Harmless here; esbuild ships prebuilt binaries as optional dependencies.
 
-**First `cargo` build is very slow** — `rusqlite` compiles SQLite from source and Tauri is a large dependency tree. Once. Later builds are incremental.
+#### Reading
 
 **A page imported sideways, split in half, or numbered wrongly** — run `check-gutter` on the photograph. It prints every measurement behind the decision, and the thresholds are constants in `preprocess.rs` and `orient.rs` with the reasoning beside them.
 
@@ -514,16 +659,25 @@ All three are configurable.
 
 ## Stack and testing
 
-**React 19 + TypeScript + Vite + Tailwind 4** in the window, **Rust** underneath, **SQLite** for storage, **Ollama** over HTTP for the models. See [Where things live](#where-things-live) for the layout.
+**React 19 + TypeScript + Vite + Tailwind 4** in the window, **Rust** underneath, **axum** for the server, **Postgres** for the library, **SQLite** for the dictionary, **Ollama** over HTTP for the models. See [Where things live](#where-things-live) for the layout.
 
 Tauri v2 rather than Electron, for a reason specific to this app: on an 8GB GPU, memory the shell doesn't take is memory the models get. About 40MB idle against roughly 350MB.
 
-**196 tests.** Many are built from *verbatim output of real models on real photographs*, because the failures that mattered were not the ones that seemed likely in advance. Several encode a specific mistake so it cannot recur — a gutter-darkness threshold measured at 0.751 on a real spread, and an orientation heuristic that got three of six real pages wrong and was deleted rather than tuned.
+The dictionary stays SQLite deliberately. It is read-only reference data with FTS5 indexes, built once and shipped — no users, no writes, no concurrency. Moving it to Postgres would cost a rewrite and buy nothing.
+
+**215 tests**, plus two scripts that need a live database and so cannot be `cargo test` cases:
 
 ```bash
-cd src-tauri && cargo test
-npx tsc --noEmit
+cargo test --workspace                              # 215
+npx tsc --noEmit                                    # types
+
+cargo run -p reading-core --example check-db        # the database layer, and isolation
+bash scripts/check-api.sh                           # the HTTP surface, over real HTTP
 ```
+
+Many of the unit tests are built from *verbatim output of real models on real photographs*, because the failures that mattered were not the ones that seemed likely in advance. Several encode a specific mistake so it cannot recur — a gutter-darkness threshold measured at 0.751 on a real spread, and an orientation heuristic that got three of six real pages wrong and was deleted rather than tuned.
+
+The two scripts are adversarial rather than confirmatory: each creates throwaway accounts and *tries to cross the boundary* in every direction — read, edit, delete, list, summarise, critique, fetch an image — and fails the run if any attempt succeeds. Each refusal is then checked to have been a genuine no-op rather than a silent partial write.
 
 ---
 
