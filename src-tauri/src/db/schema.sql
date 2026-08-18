@@ -129,6 +129,14 @@ CREATE TABLE vocab (
     UNIQUE (book_id, word)
 );
 
+-- Application settings, so the Ollama address and model choices survive a
+-- restart. Key/value rather than columns: these are a handful of strings that
+-- change independently, and a migration per setting would be absurd.
+CREATE TABLE settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE INDEX idx_pages_book       ON pages(book_id, page_no);
 -- Re-importing the same photograph is caught here rather than by page number.
 CREATE UNIQUE INDEX idx_pages_hash ON pages(book_id, image_hash);

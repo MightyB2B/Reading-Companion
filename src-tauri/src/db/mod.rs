@@ -27,7 +27,16 @@ use crate::models::{Block, Book, DraftBlock, Page};
 /// photograph, so a page records where it came from.
 /// v5: a book remembers the page you were last on, so closing the app does
 /// not lose your place.
-const SCHEMA_VERSION: i64 = 5;
+/// v6: settings are stored rather than held in memory, so the Ollama address
+/// and model choices survive a restart.
+const SCHEMA_VERSION: i64 = 6;
+
+const MIGRATE_5_TO_6: &str = "
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
 
 /// The default must be NULL — SQLite requires it of any column added with a
 /// REFERENCES clause. `ON DELETE SET NULL` rather than CASCADE: deleting the
@@ -153,6 +162,11 @@ impl Db {
             version = 5;
             conn.pragma_update(None, "user_version", version)?;
         }
+        if version == 5 {
+            conn.execute_batch(MIGRATE_5_TO_6)?;
+            version = 6;
+            conn.pragma_update(None, "user_version", version)?;
+        }
         if version != SCHEMA_VERSION {
             return Err(AppError::Invalid(format!(
                 "library database is version {version}, this build expects {SCHEMA_VERSION}"
@@ -168,6 +182,29 @@ impl Db {
         // A poisoned lock means another thread panicked mid-write. Recovering
         // the guard is better than cascading the panic through the UI.
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // ---- settings -------------------------------------------------------
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = ?2",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     // ---- books ----------------------------------------------------------

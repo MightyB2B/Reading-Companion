@@ -244,7 +244,7 @@ pub async fn detect_from_image(
     image: Vec<u8>,
 ) -> Option<i64> {
     let reply = client
-        .ask_about_image(model, FOLIO_PROMPT, image, crate::ollama::VISION_KEEP_ALIVE)
+        .ask_about_image(model, FOLIO_PROMPT, image)
         .await
         .ok()?;
     parse_folio_reply(&reply)

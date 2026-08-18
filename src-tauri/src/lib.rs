@@ -24,6 +24,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::check_ollama,
+            commands::get_settings,
+            commands::default_settings,
+            commands::save_settings,
+            commands::test_ollama_host,
+            commands::list_models,
             commands::list_books,
             commands::create_book,
             commands::book_stats,

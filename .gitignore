@@ -27,3 +27,11 @@ src-tauri/resources/dict.sqlite
 *.njsproj
 *.sln
 *.sw?
+
+# Written by the server experiment on the other branch; main has no server.
+.env
+/library/
+
+# Cargo output from the abandoned workspace layout; main builds into
+# src-tauri/target. This one is left over and must never be committed.
+/target/
