@@ -120,6 +120,8 @@ pub struct AppState {
     /// Absent when the dictionary has not been built. Lookups are then
     /// unavailable rather than the server failing to start.
     pub dict: Option<Arc<Dictionary>>,
+    /// Slows down guessing at the two endpoints an anonymous request reaches.
+    pub throttle: Arc<crate::throttle::Throttle>,
 }
 
 impl AppState {

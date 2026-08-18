@@ -149,6 +149,44 @@ expect "and it is shut"           400 "$(code POST /register '' "{\"email\":\"ga
 expect "saving without the field" 200 "$(code PUT /settings "$TA" "$S")"
 body GET /settings "$TA" | grep -q '"open_registration":false' && echo "  ok   an omitted field leaves it closed" || { echo "  FAIL omitting the field opened registration"; fail=1; }
 
+
+echo "--- guessing is slowed down ---"
+# The legitimate reader is checked FIRST, on purpose. Every request here comes
+# from 127.0.0.1, so the guessing below fills the shared per-source counter --
+# and running these afterwards would fail for that reason rather than for
+# anything wrong with the server.
+FRESH="fresh-$TAG@example.test"
+code PUT /settings "$TA" "$OPEN" >/dev/null
+body POST /register '' "{\"email\":\"$FRESH\",\"password\":\"a long enough one\"}" >/dev/null
+code PUT /settings "$TA" "$CLOSED" >/dev/null
+for i in 1 2 3 4; do code POST /sign-in '' "{\"email\":\"$FRESH\",\"password\":\"wrong\"}" >/dev/null; done
+expect "the right password still works"      200 "$(code POST /sign-in '' "{\"email\":\"$FRESH\",\"password\":\"a long enough one\"}")"
+expect "and signing in cleared the count"    400 "$(code POST /sign-in '' "{\"email\":\"$FRESH\",\"password\":\"wrong\"}")"
+
+# Five free against one account, then a wait that doubles. The free attempts
+# matter: someone mistyping their own password is far more common than an
+# attacker, and should not be punished for it.
+GUESS="guess-$TAG@example.test"
+wrong() { code POST /sign-in '' "{\"email\":\"$GUESS\",\"password\":\"wrong\"}"; }
+
+allowed=0
+for i in 1 2 3 4 5; do
+  [ "$(wrong)" = "400" ] && allowed=$((allowed+1))
+done
+expect "the first five are answered normally" 5 "$allowed"
+expect "the sixth is refused"                429 "$(wrong)"
+
+# The header has to be there, or a client has nothing to obey.
+ra=$(curl -s -D- -o /dev/null -X POST "$API/sign-in" -H 'Content-Type: application/json' \
+      -d "{\"email\":\"$GUESS\",\"password\":\"wrong\"}" | grep -i '^retry-after:' | tr -d '\r' | awk '{print $2}')
+[ -n "$ra" ] && echo "  ok   it says how long to wait (Retry-After: $ra)" || { echo "  FAIL no Retry-After header"; fail=1; }
+
+# A refused attempt must not reach argon2, or the throttle would cost the
+# server the very work it exists to avoid.
+t0=$(date +%s%N); wrong >/dev/null; t1=$(date +%s%N)
+blocked_ms=$(( (t1-t0)/1000000 ))
+[ "$blocked_ms" -lt 200 ] && echo "  ok   a blocked attempt is cheap (${blocked_ms}ms, no password hashing)" \
+  || { echo "  FAIL a blocked attempt still cost ${blocked_ms}ms"; fail=1; }
 echo
 echo "--- dictionary ---"
 NICE=$(body POST /dictionary/look-up "$TA" '{"word":"nice"}')

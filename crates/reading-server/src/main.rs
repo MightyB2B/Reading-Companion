@@ -10,6 +10,7 @@ mod auth_layer;
 mod error;
 mod routes;
 mod state;
+mod throttle;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -179,11 +180,18 @@ pub async fn serve(shutdown: impl std::future::Future<Output = ()> + Send + 'sta
         settings: Arc::new(std::sync::Mutex::new(settings)),
         library_dir,
         dict,
+        throttle: Arc::new(crate::throttle::Throttle::new()),
     };
 
     let app = routes::router(state)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http());
+
+    // `into_make_service_with_connect_info` rather than `into_make_service`:
+    // without it the peer address is not attached to the request, and the
+    // handlers that throttle by source would reject every attempt as a
+    // missing extension rather than throttling anything.
+    let service = app.into_make_service_with_connect_info::<SocketAddr>();
 
     // Loopback by default. Binding every interface is a decision with
     // consequences — it is what makes the server reachable from the network —
@@ -225,7 +233,7 @@ pub async fn serve(shutdown: impl std::future::Future<Output = ()> + Send + 'sta
 
             axum_server::bind_rustls(addr, config)
                 .handle(handle)
-                .serve(app.into_make_service())
+                .serve(service)
                 .await?;
         }
         (Some(_), None) | (None, Some(_)) => {
@@ -248,7 +256,7 @@ pub async fn serve(shutdown: impl std::future::Future<Output = ()> + Send + 'sta
                 );
             }
 
-            axum::serve(listener, app)
+            axum::serve(listener, service)
                 .with_graceful_shutdown(async move {
                     shutdown.await;
                     tracing::info!("stopping");

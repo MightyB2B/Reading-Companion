@@ -1,12 +1,14 @@
 //! Registering, signing in, and signing out.
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 
 use crate::auth_layer::Caller;
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+use crate::throttle::{keys_for, Verdict};
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -64,8 +66,18 @@ impl From<reading_core::db::pg::User> for UserResponse {
 /// network would accept signups from anyone who found the port.
 pub async fn register(
     State(state): State<AppState>,
+    ConnectInfo(from): ConnectInfo<SocketAddr>,
     Json(body): Json<RegisterRequest>,
 ) -> ApiResult<Json<SessionResponse>> {
+    // Throttled on the source alone: there is no account yet to key on, and
+    // this is the other endpoint an anonymous request can reach. Registration
+    // is closed on a settled server, but while it is open — which is exactly
+    // when a server is most exposed — it hashes a password for anyone asking.
+    let source = vec![format!("from:{}", from.ip())];
+    if let Verdict::Wait(delay) = state.throttle.check(&source) {
+        return Err(too_many(delay));
+    }
+
     let bootstrapping = !state.db.has_any_user().await?;
     if !bootstrapping && !state.settings().open_registration {
         return Err(reading_core::AppError::Invalid(
@@ -81,10 +93,18 @@ pub async fn register(
         body.display_name.clone()
     };
 
-    reading_core::auth::register(&state.db, &body.email, &display_name, &body.password).await?;
+    if let Err(e) =
+        reading_core::auth::register(&state.db, &body.email, &display_name, &body.password).await
+    {
+        // A rejected registration counts: an address already taken, or a
+        // password too short, is a request that cost the server work.
+        state.throttle.record_failure(&source);
+        return Err(e.into());
+    }
 
     let session =
         reading_core::auth::sign_in(&state.db, &body.email, &body.password, "registration").await?;
+    state.throttle.record_success(&source);
 
     Ok(Json(SessionResponse {
         token: session.token,
@@ -95,16 +115,64 @@ pub async fn register(
 
 pub async fn sign_in(
     State(state): State<AppState>,
+    ConnectInfo(from): ConnectInfo<SocketAddr>,
     Json(body): Json<SignInRequest>,
 ) -> ApiResult<Json<SessionResponse>> {
-    let session =
-        reading_core::auth::sign_in(&state.db, &body.email, &body.password, &body.label).await?;
+    let keys = keys_for(&body.email, Some(from.ip()));
 
-    Ok(Json(SessionResponse {
-        token: session.token,
-        expires_at: session.expires_at.to_rfc3339(),
-        user: session.user.into(),
-    }))
+    // Checked before the password is verified. A throttled request must not
+    // reach argon2, or the throttle would cost the server exactly the work it
+    // exists to avoid — which would turn it into the attack.
+    if let Verdict::Wait(delay) = state.throttle.check(&keys) {
+        return Err(too_many(delay));
+    }
+
+    match reading_core::auth::sign_in(&state.db, &body.email, &body.password, &body.label).await {
+        Ok(session) => {
+            state.throttle.record_success(&keys);
+            Ok(Json(SessionResponse {
+                token: session.token,
+                expires_at: session.expires_at.to_rfc3339(),
+                user: session.user.into(),
+            }))
+        }
+        Err(e) => {
+            if let Some(delay) = state.throttle.record_failure(&keys) {
+                tracing::warn!(
+                    from = %from.ip(),
+                    seconds = delay.as_secs(),
+                    "repeated sign-in failures; throttling"
+                );
+                // The wait is reported rather than the password being called
+                // wrong again: it is now true, and hiding it would leave a
+                // legitimate reader retyping a correct password into a
+                // request that was never going to be checked.
+                return Err(too_many(delay));
+            }
+            Err(e.into())
+        }
+    }
+}
+
+/// 429, with how long to wait.
+///
+/// `Retry-After` is the header a client is meant to read, and this one is
+/// honest: the same number the server is actually enforcing.
+fn too_many(delay: std::time::Duration) -> ApiError {
+    let seconds = delay.as_secs().max(1);
+    ApiError::retry_after(
+        seconds,
+        format!("too many attempts. Try again in {}.", describe(seconds)),
+    )
+}
+
+fn describe(seconds: u64) -> String {
+    match seconds {
+        0..=1 => "a second".to_string(),
+        2..=59 => format!("{seconds} seconds"),
+        60..=119 => "a minute".to_string(),
+        _ => format!("{} minutes", (seconds + 59) / 60),
+    }
 }
 
 /// Who am I? Used by a client holding a stored token to find out whether it
