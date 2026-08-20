@@ -15,6 +15,12 @@
   --color-accent: #7c5c3e;
 
   --font-serif: "Georgia", "Iowan Old Style", "Palatino Linotype", serif;
+  /* Offered as an alternative reading face; some readers strongly prefer it. */
+  --font-sans-reading: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --color-danger: #a3241a;
+  --color-warn: #8a5b00;
+  --color-ok: #1d6b3f;
+  --color-veil: rgba(24, 20, 16, 0.45);
 }
 
 /* "System" follows the OS, but only while no explicit theme is chosen. */
@@ -26,6 +32,10 @@
     --color-ink-soft: #a29a8f;
     --color-rule: #332f2a;
     --color-accent: #c99b6b;
+    --color-danger: #f0938a;
+    --color-warn: #d8ab5e;
+    --color-ok: #7fbb88;
+    --color-veil: rgba(0, 0, 0, 0.66);
   }
 }
 
@@ -36,6 +46,10 @@
   --color-ink-soft: #57514a;
   --color-rule: #e2dbcf;
   --color-accent: #7c5c3e;
+  --color-danger: #a3241a;
+  --color-warn: #8a5b00;
+  --color-ok: #1d6b3f;
+  --color-veil: rgba(24, 20, 16, 0.45);
 }
 
 :root[data-theme="dark"] {
@@ -45,6 +59,10 @@
   --color-ink-soft: #a29a8f;
   --color-rule: #332f2a;
   --color-accent: #c99b6b;
+  --color-danger: #f0938a;
+  --color-warn: #d8ab5e;
+  --color-ok: #7fbb88;
+  --color-veil: rgba(0, 0, 0, 0.66);
 }
 
 /* Aged paper. Warmer and lower-contrast than the light theme — easier on the
@@ -56,6 +74,10 @@
   --color-ink-soft: #6b5b45;
   --color-rule: #d8caa9;
   --color-accent: #8a5a2b;
+  --color-danger: #992d20;
+  --color-warn: #7d5410;
+  --color-ok: #1f6238;
+  --color-veil: rgba(58, 47, 33, 0.45);
 }
 
 /* For reading at night without a lit room. Deep blue rather than black:
@@ -67,6 +89,10 @@
   --color-ink-soft: #7d8798;
   --color-rule: #263140;
   --color-accent: #7aa2d6;
+  --color-danger: #f09a92;
+  --color-warn: #dab070;
+  --color-ok: #7fc0a0;
+  --color-veil: rgba(0, 0, 0, 0.7);
 }
 
 /* Maximum contrast, no warmth. For bright rooms and tired eyes. */
@@ -77,6 +103,10 @@
   --color-ink-soft: #333333;
   --color-rule: #999999;
   --color-accent: #0043a8;
+  --color-danger: #a80000;
+  --color-warn: #6b4200;
+  --color-ok: #00600f;
+  --color-veil: rgba(0, 0, 0, 0.6);
 }
 
 html,
@@ -92,11 +122,21 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-/* The reading pane itself is serif; the working chrome around it is not. */
+/* The reading pane itself is serif; the working chrome around it is not.
+
+   Size, leading, measure and face come from variables the reader sets, with
+   the old hard-coded values as the fallback — so a build with no preferences
+   stored looks exactly as it did. */
 .prose-page {
-  font-family: var(--font-serif);
-  font-size: 1.05rem;
-  line-height: 1.75;
+  font-family: var(--reading-face, var(--font-serif));
+  font-size: var(--reading-size, 1.05rem);
+  line-height: var(--reading-leading, 1.75);
+}
+
+/* The measure applies only to the column of running text, not to the
+   paragraph quoted inside a panel, which has its own narrow box. */
+.reading-measure {
+  max-width: var(--reading-measure, 68ch);
 }
 
 /* ---- scrollbars ---------------------------------------------------------
@@ -135,196 +175,276 @@ body {
   background: transparent;
 }
 
-/* ---- page turn ----------------------------------------------------------
-   A real leaf: a sheet of paper with two sides, hinged at the spine, that
-   lifts, sweeps over, and lands face down while the next page is revealed
-   beneath it.
 
-   The earlier version rotated the whole pane a few degrees and faded it. That
-   reads as a swinging door rather than paper, for three reasons, all fixed
-   here: a sheet has a *back*, which you see for the second half of the turn;
-   it rotates a full 180° rather than peeking; and it casts a moving shadow on
-   what it uncovers.
+/* ---- study-layer marks --------------------------------------------------
+   The nine dialectical moves need colours that work on all six themes, so
+   each is a single hue mixed against `paper` for its ground and against `ink`
+   for its text. A theme change re-mixes them; adding a seventh theme still
+   costs six variables and nothing here.
 
-   StPageFlip (MIT, and genuinely good) was evaluated instead. It clones the
-   page elements into its own wrapper, which would leave the reader looking at
-   a copy — no click-to-focus, no word selection, no inline correction. So the
-   live page stays live and only a snapshot of the outgoing page is animated.
-
-   Perspective lives on the stage, never on the leaf: on the leaf, each face
-   gets its own vanishing point and the sheet visibly bends. */
-
-.page-stage {
-  perspective: 2400px;
-  perspective-origin: 50% 50%;
-
-  /* Shading strengths, gathered here because they are the only part of this
-     worth tuning by eye. Paper shading is a depth cue, not a light source —
-     the first pass peaked at 0.75 and read as a glow sweeping the page. */
-  --leaf-sheen-ink: 14%;
-  --leaf-sheen-peak: 0.32;
-  --leaf-cast-ink: 32%;
-  --leaf-cast-peak: 0.42;
+   The hues themselves live on :root rather than per theme: a hue is a fact
+   about the category, and only the mixing is theme-dependent. */
+@theme {
+  --color-move-thesis: #5b5bb0;
+  --color-move-premise: #3f7a4a;
+  --color-move-conclusion: #5b5bb0;
+  --color-move-definition: #7d4c92;
+  --color-move-objection: #b04a33;
+  --color-move-reply: #2f7392;
+  --color-move-example: #936a24;
+  --color-move-concession: #936a24;
+  --color-move-aporia: #b04a33;
 }
 
-.leaf {
-  position: absolute;
-  inset: 0;
-  z-index: 20;
-  transform-style: preserve-3d;
-  pointer-events: none;
-  will-change: transform;
+/* A mark the reader made: a solid wash, the way a highlighter behaves. */
+.mark {
+  background: color-mix(in oklab, currentColor 16%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0.05em 0.1em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
-/* Hinged at the spine. Forward turns pivot on the left edge, back turns on
-   the right, which is what makes the two directions feel different rather
-   than merely reversed. */
-.leaf-forward {
-  transform-origin: left center;
-  animation: leaf-turn-forward var(--leaf-duration, 620ms)
-    cubic-bezier(0.36, 0.05, 0.28, 1) forwards;
+.mark-thesis      { color: var(--color-move-thesis); }
+.mark-premise     { color: var(--color-move-premise); }
+.mark-conclusion  { color: var(--color-move-conclusion); }
+.mark-definition  { color: var(--color-move-definition); }
+.mark-objection   { color: var(--color-move-objection); }
+.mark-reply       { color: var(--color-move-reply); }
+.mark-example     { color: var(--color-move-example); }
+.mark-concession  { color: var(--color-move-concession); }
+.mark-aporia      { color: var(--color-move-aporia); }
+
+/* Marks carry the hue in `color` so the wash can be mixed from it, but the
+   text underneath still has to be readable, so it is restored to ink. */
+.mark > * { color: var(--color-ink); }
+
+/* A suggestion from the model: dotted, never solid, and never saved until
+   accepted. The distinction has to survive at a glance — a reader who cannot
+   tell their own marks from the machine's is not being helped. */
+.sugg {
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 5px;
+}
+.sugg-thesis      { text-decoration-color: var(--color-move-thesis); }
+.sugg-premise     { text-decoration-color: var(--color-move-premise); }
+.sugg-conclusion  { text-decoration-color: var(--color-move-conclusion); }
+.sugg-definition  { text-decoration-color: var(--color-move-definition); }
+.sugg-objection   { text-decoration-color: var(--color-move-objection); }
+.sugg-reply       { text-decoration-color: var(--color-move-reply); }
+.sugg-example     { text-decoration-color: var(--color-move-example); }
+.sugg-concession  { text-decoration-color: var(--color-move-concession); }
+.sugg-aporia      { text-decoration-color: var(--color-move-aporia); }
+
+/* A word with a gloss written for it.
+   A tinted wash rather than the hairline underline this started as: the
+   underline was technically present and practically invisible, so glossed
+   terms read as unmarked and the whole Terms panel felt like it did nothing.
+   Still quieter than a note, because these accumulate into the hundreds. */
+.term {
+  background: color-mix(in oklab, var(--color-accent) 11%, transparent);
+  border-radius: 2px;
+  padding: 0.05em 0.1em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  cursor: help;
+}
+/* A term still unclear is the one worth finding again, so it keeps an
+   underline on top of the wash. */
+.term-unclear {
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-color: color-mix(in oklab, var(--color-accent) 65%, transparent);
+}
+.term-settled {
+  background: color-mix(in oklab, var(--color-ink) 7%, transparent);
 }
 
-.leaf-back {
-  transform-origin: right center;
-  animation: leaf-turn-back var(--leaf-duration, 620ms)
-    cubic-bezier(0.36, 0.05, 0.28, 1) forwards;
+/* A scripture citation found in ordinary prose. */
+.vref {
+  color: var(--color-accent);
+  font-weight: 600;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-accent) 40%, transparent);
+  cursor: pointer;
+}
+.vref:hover {
+  background: color-mix(in oklab, var(--color-accent) 12%, transparent);
+  border-radius: 2px;
 }
 
-@keyframes leaf-turn-forward {
-  from {
-    transform: rotateY(0deg);
-  }
-  to {
-    transform: rotateY(-180deg);
-  }
+
+/* The standing selection.
+   Drawn by the application rather than left to the browser's `::selection`,
+   which is cleared the instant focus moves to a panel input. Losing the
+   highlight on the way to the Notes box — the very panel you clicked in order
+   to act on the selection — was what made highlighting feel broken. */
+.mark-pending {
+  background: color-mix(in oklab, var(--color-accent) 28%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0.05em 0.1em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  outline: 1px solid color-mix(in oklab, var(--color-accent) 45%, transparent);
 }
 
-@keyframes leaf-turn-back {
-  from {
-    transform: rotateY(0deg);
-  }
-  to {
-    transform: rotateY(180deg);
-  }
+/* A word double-clicked to check its meaning.
+   Deliberately far quieter than a deliberate selection: a lookup is
+   incidental, and giving each one the full wash striped the paragraph after
+   half a dozen words. */
+.mark-lookup {
+  background: transparent;
+  color: inherit;
+  border-bottom: 2px solid color-mix(in oklab, var(--color-accent) 55%, transparent);
 }
 
-.leaf-face {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  backface-visibility: hidden;
+/* A note with no dialectical tag still marks its words. The body stays out of
+   the column — that is the gutter dot and the hover card's job — but an anchor
+   you cannot see is an anchor you cannot find again. */
+.mark-note { color: var(--color-accent); }
+
+/* Corresponding words: repeated terms in the passage, tinted per group.
+   Underlines rather than washes, so they can sit under a note or a term
+   highlight without three backgrounds fighting for the same words. */
+.echo {
+  text-decoration-line: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+  border-radius: 1px;
+}
+.echo-0 { text-decoration-color: var(--color-move-thesis); }
+.echo-1 { text-decoration-color: var(--color-move-premise); }
+.echo-2 { text-decoration-color: var(--color-move-objection); }
+.echo-3 { text-decoration-color: var(--color-move-reply); }
+.echo-4 { text-decoration-color: var(--color-move-definition); }
+.echo-5 { text-decoration-color: var(--color-move-example); }
+
+/* ---- panel chrome -------------------------------------------------------
+   Tab strips, borrowed from Logos: a column holds several tools at once and
+   you switch between them the way you switch browser tabs. */
+.tabstrip {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 0 0.35rem;
+  border-bottom: 1px solid var(--color-rule);
+  background: var(--color-paper-dim);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabstrip::-webkit-scrollbar { display: none; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  padding: 0.35rem 0.5rem 0.35rem 0.65rem;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 4px 4px 0 0;
+  color: var(--color-ink-soft);
+  margin-top: 0.3rem;
+  cursor: pointer;
+  user-select: none;
+}
+.tab:hover { color: var(--color-accent); }
+.tab:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+/* The close control lives inside the tab so it moves with it and cannot be
+   clipped by the strip's horizontal scrolling — which is what happened when
+   it was a sibling element. */
+.tab-close {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  line-height: 1;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  color: var(--color-ink-soft);
+  /* Hidden until the tab is active or hovered: a row of close buttons reads
+     as clutter, and an accidental one is worse than a hidden one. */
+  opacity: 0;
+}
+.tab:hover .tab-close,
+.tab[aria-selected="true"] .tab-close {
+  opacity: 0.75;
+}
+.tab-close:hover {
+  opacity: 1;
+  background: color-mix(in oklab, red 22%, transparent);
+  color: var(--color-ink);
+}
+
+.tab-add {
+  padding-inline: 0.6rem;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.tab[aria-selected="true"] {
   background: var(--color-paper);
-  border: 1px solid var(--color-rule);
+  border-color: var(--color-rule);
+  color: var(--color-accent);
+  font-weight: 600;
+  margin-bottom: -1px;
+  padding-bottom: calc(0.35rem + 1px);
 }
 
-/* The reverse of the sheet. Turned to face the other way, so it appears
-   exactly as the leaf passes vertical. */
-.leaf-face-back {
-  transform: rotateY(180deg);
+/* Which pane is taking your keystrokes.
+   A 30%-opacity wash on the *other* pane was too faint to read at a glance;
+   an accent rule under the live pane's tabs is the same device the active tab
+   already uses, one level up. */
+.tabstrip-focused {
+  box-shadow: inset 0 -2px 0 0 var(--color-accent);
 }
 
-/* Paper is not transparent, but it is thin: the far side of a page carries a
-   faint ghost of its own printing and the light falling across it. */
-.leaf-face-back::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    to left,
-    color-mix(in oklab, var(--color-ink) 10%, transparent),
-    transparent 55%
-  );
+/* ---- the tool rail ------------------------------------------------------
+   Labelled rather than ten cryptic glyphs. `⋔` and a bare `A` are not
+   discoverable at any width, and a tool nobody can find is a tool that was
+   not built. */
+.rail-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  width: 100%;
+  padding: 0.35rem 0.15rem;
+  border-radius: 4px;
+  color: var(--color-ink-soft);
+  font-size: 0.6rem;
+  line-height: 1.1;
+  text-align: center;
+}
+.rail-item:hover { background: var(--color-paper); color: var(--color-accent); }
+.rail-item[aria-current="true"] {
+  background: var(--color-accent);
+  color: var(--color-paper);
+}
+.rail-group {
+  width: 100%;
+  padding: 0.5rem 0 0.15rem;
+  font-size: 0.55rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-align: center;
+  color: color-mix(in oklab, var(--color-ink-soft) 70%, transparent);
 }
 
-/* Shading across the leaf itself, so the sheet reads as curved rather than
-   as a flat plane pivoting. Strongest at the hinge, where a real page bends
-   most sharply. */
-.leaf-face::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  pointer-events: none;
-  animation: leaf-sheen var(--leaf-duration, 620ms) ease-in-out forwards;
-}
-
-.leaf-forward .leaf-face::before {
-  background: linear-gradient(
-    to right,
-    color-mix(in oklab, var(--color-ink) var(--leaf-sheen-ink), transparent),
-    transparent 26%
-  );
-}
-
-.leaf-back .leaf-face::before {
-  background: linear-gradient(
-    to left,
-    color-mix(in oklab, var(--color-ink) var(--leaf-sheen-ink), transparent),
-    transparent 26%
-  );
-}
-
-@keyframes leaf-sheen {
-  0%,
-  100% {
-    opacity: 0.08;
-  }
-  50% {
-    opacity: var(--leaf-sheen-peak);
-  }
-}
-
-/* The shadow the lifting leaf throws across the page it uncovers. Peaks as
-   the leaf stands vertical and is gone by the time it lands. */
-.leaf-cast-shadow {
-  position: absolute;
-  inset: 0;
-  z-index: 10;
-  pointer-events: none;
-  animation: leaf-cast var(--leaf-duration, 620ms) ease-in-out forwards;
-}
-
-.leaf-cast-forward {
-  background: linear-gradient(
-    to right,
-    color-mix(in oklab, var(--color-ink) var(--leaf-cast-ink), transparent),
-    transparent 55%
-  );
-}
-
-.leaf-cast-back {
-  background: linear-gradient(
-    to left,
-    color-mix(in oklab, var(--color-ink) var(--leaf-cast-ink), transparent),
-    transparent 55%
-  );
-}
-
-@keyframes leaf-cast {
-  0%,
-  100% {
-    opacity: 0;
-  }
-  45% {
-    opacity: var(--leaf-cast-peak);
-  }
-}
-
-/* The page being uncovered settles the last of the way, so it does not simply
-   appear the instant the leaf clears it. */
-.page-settling {
-  animation: page-settle var(--leaf-duration, 620ms) ease-out;
-}
-
-@keyframes page-settle {
-  0%,
-  40% {
-    opacity: 0.55;
-  }
-  100% {
-    opacity: 1;
-  }
+/* The strip lights up while a tab is being dragged over it. */
+.tabstrip-drop {
+  background: color-mix(in oklab, var(--color-accent) 16%, var(--color-paper-dim));
+  outline: 2px dashed color-mix(in oklab, var(--color-accent) 55%, transparent);
+  outline-offset: -3px;
 }
 
 /* ---- wizard -------------------------------------------------------------
@@ -421,15 +541,6 @@ body {
 
 /* Respect a reader who has asked the system for less motion. */
 @media (prefers-reduced-motion: reduce) {
-  /* The leaf is hidden outright rather than merely un-animated: a sheet of
-     paper frozen mid-turn across the page would be worse than no turn. */
-  .leaf,
-  .leaf-cast-shadow {
-    display: none;
-  }
-
-  .leaf-face::before,
-  .page-settling,
   .veil-in,
   .panel-in,
   .step-in-forward,

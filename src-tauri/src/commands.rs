@@ -125,7 +125,7 @@ impl Settings {
 }
 
 impl AppState {
-    fn settings(&self) -> Settings {
+    pub(crate) fn settings(&self) -> Settings {
         self.settings
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -134,7 +134,7 @@ impl AppState {
 
     /// A snapshot of the client. Cloning is cheap — `reqwest::Client` is an
     /// Arc internally — and it avoids holding the lock across an await.
-    fn ollama(&self) -> OllamaClient {
+    pub(crate) fn ollama(&self) -> OllamaClient {
         self.ollama
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -569,6 +569,53 @@ fn import_page_blocking(
     })
 }
 
+/// Re-crop a page's photograph to the region the reader drew, and re-read it.
+///
+/// The answer to a photograph that caught the facing page, the desk, or a
+/// thumb. The OCR model transcribes whatever it is shown, so the only reliable
+/// fix is to stop showing it the part that is not the page — prompt wording
+/// cannot make a model ignore text that is plainly there.
+///
+/// Notes are re-anchored and citations rescanned by `run_ocr` afterwards, so
+/// work already done on the page survives the re-read where its text does.
+#[tauri::command]
+pub async fn recrop_page(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    page_id: i64,
+    rect: ocr::preprocess::CropRect,
+) -> Result<Vec<crate::models::Block>> {
+    let (book_id, orig_path, _) = state.db.page_images(page_id)?;
+
+    let bytes = std::fs::read(&orig_path)?;
+    let cropped = tokio::task::spawn_blocking(move || {
+        ocr::preprocess::crop_import(&bytes, rect, &ocr::preprocess::PreprocessOptions::default())
+    })
+    .await
+    .map_err(|e| AppError::Invalid(format!("cropping failed: {e}")))??;
+
+    let book_dir = state.library_dir.join(format!("book-{book_id}"));
+    std::fs::create_dir_all(&book_dir)?;
+    let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S%3f");
+
+    let orig = book_dir.join(format!("{stamp}-crop-orig.jpg"));
+    std::fs::write(&orig, &cropped.archival)?;
+    let proc_path = book_dir.join(format!("{stamp}-crop-proc.jpg"));
+    std::fs::write(&proc_path, &cropped.processed)?;
+
+    state.db.replace_page_images(
+        page_id,
+        &image_hash(&cropped.archival),
+        &orig.to_string_lossy(),
+        &proc_path.to_string_lossy(),
+    )?;
+
+    // The previous images are left on disk deliberately. A crop the reader
+    // regrets is otherwise unrecoverable, and a few megabytes is a cheap price
+    // for not having destroyed the only copy of the photograph.
+    run_ocr(app, state, page_id, book_id).await
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct OcrProgress {
     pub page_id: i64,
@@ -851,7 +898,24 @@ pub async fn run_ocr(
         .db
         .save_ocr_result(page_id, &settings.ocr_model, &raw, &blocks)?;
 
-    state.db.list_blocks(page_id)
+    // Saving destroyed this page's blocks and made new ones, so anything
+    // anchored to the old ids has just come loose. Put it back before the
+    // reader sees the page again — a note that silently vanishes because a
+    // page was re-transcribed is the worst thing this application could do.
+    state.db.reattach_notes(book_id)?;
+
+    // Citations are found here rather than on demand: the reverse lookup
+    // ("what in my library bears on Romans 3") has to be able to answer for
+    // the whole library, not just the pages someone happens to have opened.
+    let fresh = state.db.list_blocks(page_id)?;
+    for block in &fresh {
+        let found = crate::scripture::find_references(&block.text_norm);
+        state
+            .db
+            .replace_refs_for_block(book_id, block.id, &found)?;
+    }
+
+    Ok(fresh)
 }
 
 /// Delete a page, its blocks, and its image files.

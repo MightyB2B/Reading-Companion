@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type Book, type OllamaStatus } from "./lib/api";
 import { Library } from "./components/Library";
-import { Reader } from "./components/Reader";
+import { Workspace } from "./components/Workspace";
 import { SettingsWindow } from "./components/SettingsWindow";
 import { ThemePicker } from "./components/ThemePicker";
 import "./index.css";
@@ -68,7 +68,7 @@ export default function App() {
 
       <main className="min-h-0 flex-1">
         {book ? (
-          <Reader book={book} />
+          <Workspace book={book} onCloseBook={() => setBook(null)} />
         ) : (
           <Library onOpen={setBook} />
         )}
@@ -106,7 +106,7 @@ function OllamaBadge({ status }: { status: OllamaStatus | null }) {
     >
       <span
         className={`inline-block h-2 w-2 rounded-full ${
-          status.reachable ? "bg-amber-500" : "bg-red-500"
+          status.reachable ? "bg-warn" : "bg-danger"
         }`}
       />
       {status.reachable ? "models missing" : "offline"}

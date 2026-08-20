@@ -8,6 +8,7 @@ import {
   type Settings,
 } from "../lib/api";
 import { applyTheme, storedTheme, THEMES, type Theme } from "../lib/theme";
+import { ReadingSettings } from "./ReadingSettings";
 import { Spinner } from "./Spinner";
 
 /**
@@ -128,7 +129,7 @@ export function SettingsWindow({
     <div
       // See AddContentWizard: a full-screen backdrop-blur is recomposited on
       // every frame that anything above it animates.
-      className="veil-in fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
+      className="veil-in fixed inset-0 z-50 flex items-center justify-center bg-veil p-6"
       onClick={onClose}
     >
       <div
@@ -235,8 +236,8 @@ export function SettingsWindow({
                   <p
                     className={`mt-2.5 rounded border px-3 py-2 text-xs ${
                       test.reachable
-                        ? "border-emerald-600/30 bg-emerald-600/5 text-emerald-700"
-                        : "border-red-500/30 bg-red-500/5 text-red-600"
+                        ? "border-ok/30 bg-ok/5 text-ok"
+                        : "border-danger/30 bg-danger/5 text-danger"
                     }`}
                   >
                     {test.message}
@@ -339,9 +340,17 @@ export function SettingsWindow({
                   Kept on this machine rather than in your library — it is a
                   property of the screen you are reading on.
                 </p>
+
+                {/* Type belongs beside the palette: both are how the page
+                    looks to the person in front of it, and this application
+                    had settings for three model names and nothing at all for
+                    the words. */}
+                <div className="mt-5">
+                  <ReadingSettings />
+                </div>
               </Section>
 
-              {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
+              {error && <p className="mt-4 text-sm text-danger">{error}</p>}
             </>
           )}
         </div>
@@ -458,7 +467,7 @@ function ModelField({
       {loading && <p className="mt-1 text-xs text-ink-soft">Asking the server…</p>}
 
       {!loading && eligible.length === 0 && (
-        <p className="mt-1 text-xs text-amber-600">
+        <p className="mt-1 text-xs text-warn">
           {needsVision
             ? "No model on that server reports being able to read images."
             : "No models found on that server."}
@@ -466,7 +475,7 @@ function ModelField({
       )}
 
       {!loading && !installed && eligible.length > 0 && (
-        <p className="mt-1 text-xs text-amber-600">
+        <p className="mt-1 text-xs text-warn">
           Not on that server — pull it with{" "}
           <code>ollama pull {value}</code>, or choose one above.
         </p>

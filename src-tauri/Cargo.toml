@@ -52,4 +52,6 @@ sha2 = "0.11.0"
 epub = "2.1.5"
 pdf-extract = "0.12.0"
 scraper = "0.27.0"
+docx-rs = "0.4.22"
+zip = "8.6.0"
 

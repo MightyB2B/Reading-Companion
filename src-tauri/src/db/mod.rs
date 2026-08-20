@@ -5,6 +5,11 @@
 //! single-user desktop application, contention is nil, and a `Connection`
 //! behind a `Mutex` is far simpler to reason about than a pool.
 
+pub mod reading;
+pub mod search;
+pub mod scripture;
+pub mod study;
+
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -29,7 +34,24 @@ use crate::models::{Block, Book, DraftBlock, Page};
 /// not lose your place.
 /// v6: settings are stored rather than held in memory, so the Ollama address
 /// and model choices survive a restart.
-const SCHEMA_VERSION: i64 = 6;
+/// v7: the study layer — notes and marks anchored to spans of text, the
+/// author's own terms, standard-form argument reconstructions, verse
+/// addressing, scripture citations found in any book, and workflows as data
+/// rather than as hardcoded React.
+/// v8: the library is searchable — an FTS5 index over every block — and a
+/// note can be anchored in several places at once, which is what a selection
+/// dragged across a page boundary has always meant.
+const SCHEMA_VERSION: i64 = 8;
+
+/// The v7 tables, shared verbatim between a fresh database and a migrated
+/// one. Every statement is `IF NOT EXISTS`, so applying it twice is harmless
+/// — which matters, because a database created by a build between these two
+/// versions could have some of them already.
+const MIGRATE_6_TO_7: &str = include_str!("v7.sql");
+
+/// Same contract as v7: every statement idempotent, so it can be applied to a
+/// fresh database and to a migrating one without branching.
+const MIGRATE_7_TO_8: &str = include_str!("v8.sql");
 
 const MIGRATE_5_TO_6: &str = "
 CREATE TABLE IF NOT EXISTS settings (
@@ -137,6 +159,12 @@ impl Db {
 
         if version == 0 {
             conn.execute_batch(SCHEMA)?;
+            // The study layer is applied on top rather than folded into
+            // schema.sql, so there is exactly one definition of these tables
+            // and a fresh database is byte-for-byte what a migrated one
+            // becomes.
+            conn.execute_batch(MIGRATE_6_TO_7)?;
+            conn.execute_batch(MIGRATE_7_TO_8)?;
             version = SCHEMA_VERSION;
             conn.pragma_update(None, "user_version", version)?;
         }
@@ -165,6 +193,16 @@ impl Db {
         if version == 5 {
             conn.execute_batch(MIGRATE_5_TO_6)?;
             version = 6;
+            conn.pragma_update(None, "user_version", version)?;
+        }
+        if version == 6 {
+            conn.execute_batch(MIGRATE_6_TO_7)?;
+            version = 7;
+            conn.pragma_update(None, "user_version", version)?;
+        }
+        if version == 7 {
+            conn.execute_batch(MIGRATE_7_TO_8)?;
+            version = 8;
             conn.pragma_update(None, "user_version", version)?;
         }
         if version != SCHEMA_VERSION {
@@ -313,6 +351,14 @@ impl Db {
                  WHERE p.book_id = ?1 AND s.sentence_ordinal IS NULL",
             )?,
             words_looked_up: count("SELECT COUNT(*) FROM vocab WHERE book_id = ?1")?,
+            // Everything the study layer added. These cascade-delete with the
+            // book exactly as summaries do, and counting only the pre-v7
+            // tables meant the delete prompt named a fraction of what it was
+            // about to destroy — a reader could lose forty glosses and a dozen
+            // reconstructions while being told about pages and summaries.
+            notes: count("SELECT COUNT(*) FROM notes WHERE book_id = ?1")?,
+            terms: count("SELECT COUNT(*) FROM terms WHERE book_id = ?1")?,
+            arguments: count("SELECT COUNT(*) FROM arguments WHERE book_id = ?1")?,
         })
     }
 
@@ -549,6 +595,41 @@ impl Db {
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    /// Point a page at new image files, after it has been re-cropped.
+    ///
+    /// The hash goes with them: it is what stops the same photograph being
+    /// imported twice, and a cropped page is genuinely a different image.
+    /// `ocr_status` returns to pending because the text on disk describes a
+    /// picture that no longer exists.
+    pub fn replace_page_images(
+        &self,
+        page_id: i64,
+        hash: &str,
+        image_orig: &str,
+        image_proc: &str,
+    ) -> Result<()> {
+        let conn = self.lock();
+        let changed = conn.execute(
+            "UPDATE pages
+                SET image_hash = ?2, image_orig = ?3, image_proc = ?4,
+                    ocr_status = 'pending', ocr_error = NULL
+              WHERE id = ?1",
+            params![page_id, hash, image_orig, image_proc],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound(format!("page {page_id}")));
+        }
+        Ok(())
+    }
+
+    pub fn page_images(&self, page_id: i64) -> Result<(i64, String, Option<String>)> {
+        Ok(self.lock().query_row(
+            "SELECT p.book_id, p.image_orig, p.image_proc FROM pages p WHERE p.id = ?1",
+            params![page_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
     }
 
     pub fn set_page_status(&self, page_id: i64, status: &str, error: Option<&str>) -> Result<()> {
@@ -999,6 +1080,10 @@ pub struct BookStats {
     /// Paragraphs the reader has summarised.
     pub summaries: i64,
     pub words_looked_up: i64,
+    /// Notes and marks together — both are rows in `notes`.
+    pub notes: i64,
+    pub terms: i64,
+    pub arguments: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

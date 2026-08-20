@@ -14,6 +14,24 @@ import { Spinner } from "./Spinner";
  */
 export type SourceChoice = "photo" | "file" | "web";
 
+/** The filename, without the directory. */
+function basename(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+/**
+ * Sort filenames the way a person would: `IMG_9.jpg` before `IMG_10.jpg`.
+ *
+ * Plain string order puts 10 before 9, which for a stack of camera files means
+ * the book imports scrambled and every page number has to be fixed by hand.
+ */
+function compareNatural(a: string, b: string): number {
+  return basename(a).localeCompare(basename(b), undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
 type Step = "choose" | "url" | "working" | "numbering" | "done";
 
 export interface WizardResult {
@@ -46,6 +64,12 @@ export function AddContentWizard({
   const [result, setResult] = useState<WizardResult | null>(null);
   const [toNumber, setToNumber] = useState<Page[]>([]);
   const [numbered, setNumbered] = useState(0);
+  /** Which file of how many, while a stack of photographs is importing. */
+  const [batch, setBatch] = useState<{
+    at: number;
+    of: number;
+    name: string;
+  } | null>(null);
 
   const go = (next: Step, dir: "forward" | "back" = "forward") => {
     setDirection(dir);
@@ -78,12 +102,55 @@ export function AddContentWizard({
     }
   };
 
+  /**
+   * Import a stack of photographs, one at a time.
+   *
+   * Sequential rather than parallel: each page runs a vision model, and firing
+   * twenty at a GPU at once makes all twenty slow instead of the first one
+   * fast. More importantly, a failure on the seventh photograph must not
+   * abandon the eight through twenty — so each is caught on its own and the
+   * run reports at the end what did not make it.
+   */
+  const runMany = async (sources: string[]) => {
+    go("working");
+    const unnumbered: Page[] = [];
+    const failures: string[] = [];
+    let done = 0;
+
+    for (const [i, source] of sources.entries()) {
+      setBatch({ at: i + 1, of: sources.length, name: basename(source) });
+      const outcome = await onImport("photo", source);
+      if (outcome.error) failures.push(`${basename(source)}: ${outcome.error}`);
+      else done += 1;
+      unnumbered.push(...(outcome.needsNumbers ?? []));
+    }
+    setBatch(null);
+
+    setResult({
+      summary:
+        sources.length === 1
+          ? (failures.length ? "" : "Page added.")
+          : `${done} of ${sources.length} pages added.`,
+      error: failures.length ? failures.join("\n") : undefined,
+    });
+
+    if (unnumbered.length > 0) {
+      setToNumber(unnumbered);
+      go("numbering");
+    } else {
+      go("done");
+    }
+  };
+
   const pickPhoto = async () => {
     const chosen = await open({
-      multiple: false,
+      // Photographing a book produces a stack, not a page. Making the picker
+      // take one file at a time turned an evening's reading into an evening
+      // of importing.
+      multiple: true,
       filters: [
         {
-          name: "Page photo",
+          name: "Page photos",
           extensions: [
             "jpg", "jpeg", "png", "webp", "heic", "heif",
             "tif", "tiff", "bmp", "avif",
@@ -91,7 +158,9 @@ export function AddContentWizard({
         },
       ],
     });
-    if (typeof chosen === "string") await run("photo", chosen);
+    const files = Array.isArray(chosen) ? chosen : chosen ? [chosen] : [];
+    // Filenames from a camera sort into shooting order, which is page order.
+    if (files.length) await runMany([...files].sort(compareNatural));
   };
 
   const pickFile = async () => {
@@ -110,7 +179,7 @@ export function AddContentWizard({
 
   return (
     <div
-      className="veil-in fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 backdrop-blur-[2px]"
+      className="veil-in fixed inset-0 z-50 flex items-center justify-center bg-veil p-6 backdrop-blur-[2px]"
       onClick={() => step !== "working" && onClose()}
     >
       <div
@@ -211,10 +280,12 @@ export function AddContentWizard({
                   <p className="font-medium">
                     {progress?.detail ?? "Getting started"}
                   </p>
-                  <p className="mt-0.5 text-xs text-ink-soft">
-                    {progress
-                      ? `Step ${progress.step} of ${progress.total} · everything runs on your machine`
-                      : "Everything runs on your machine"}
+                  <p className="mt-0.5 truncate text-xs text-ink-soft">
+                    {batch
+                      ? `Page ${batch.at} of ${batch.of} · ${batch.name}`
+                      : progress
+                        ? `Step ${progress.step} of ${progress.total} · everything runs on your machine`
+                        : "Everything runs on your machine"}
                   </p>
                 </div>
               </div>
@@ -484,7 +555,7 @@ function GlobeIcon() {
 
 function CheckMark() {
   return (
-    <svg className="h-7 w-7 shrink-0 text-emerald-600" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg className="h-7 w-7 shrink-0 text-ok" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5" className="opacity-30" />
       <path className="check-draw" d="M7.5 12.5l3 3 6-6.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
@@ -493,7 +564,7 @@ function CheckMark() {
 
 function CrossMark() {
   return (
-    <svg className="h-7 w-7 shrink-0 text-red-600" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg className="h-7 w-7 shrink-0 text-danger" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5" className="opacity-30" />
       <path d="M15 9l-6 6M9 9l6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>

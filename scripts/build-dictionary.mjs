@@ -21,6 +21,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
+import { ensureWordnet, insertWordnet, readWordnet } from "./wordnet.mjs";
 import { pipeline } from "node:stream/promises";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -255,6 +256,22 @@ async function main() {
       `${kept.archaic_spelling} archaic spellings, ${kept.irregular} irregular forms`,
   );
 
+  // --- WordNet, as the corpus underneath ---------------------------------
+  //
+  // Webster's stays authoritative and stays first in every result: its sense
+  // of "nice" is the one Austen meant. But it is a 1913 book, and a reader who
+  // meets a word it never recorded gets nothing at all. This is what answers
+  // for those.
+  console.log("");
+  console.log("· WordNet");
+  const wordnetDir = await ensureWordnet(CACHE);
+  const wordnet = await readWordnet(wordnetDir);
+  const added = insertWordnet(db, wordnet);
+  console.log(
+    `  ${added.entryCount.toLocaleString()} entries, ` +
+      `${added.senseCount.toLocaleString()} senses`,
+  );
+
   // --- full-text index ----------------------------------------------------
   console.log("· building full-text index");
   db.exec(`
@@ -277,6 +294,8 @@ async function main() {
   const check = new DatabaseSync(OUT_DB, { readOnly: true });
   const probes = [
     ["nice", "obsolete first sense — the period-correct payoff"],
+    ["omnipotence", "absent from Webster's; WordNet answers"],
+    ["unending", "absent from Webster's; WordNet answers"],
     ["shew", "cross-reference variant"],
     ["hath", "archaic verb form"],
     ["publick", "curated archaic spelling"],

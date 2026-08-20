@@ -39,6 +39,18 @@ export interface BookStats {
   /** Paragraphs you have summarised. */
   summaries: number;
   words_looked_up: number;
+  /** Notes and marks together. */
+  notes: number;
+  terms: number;
+  arguments: number;
+}
+
+/** A crop rectangle in fractions of the image, as drawn on the preview. */
+export interface CropRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface Page {
@@ -170,7 +182,11 @@ export type Resolution =
   | "cross_reference"
   | "archaic_spelling"
   | "irregular"
-  | "inflection";
+  | "inflection"
+  /** Reached by stripping a prefix — unending -> ending. */
+  | "prefixed"
+  /** Reached by swapping a derivational ending — omnipotence -> omnipotent. */
+  | "derived";
 
 export const RESOLUTION_NOTE: Partial<Record<Resolution, string>> = {
   cross_reference: "an older spelling of",
@@ -184,12 +200,22 @@ export interface Sense {
   /** e.g. "obsolete", "archaic" — already out of use by 1913. */
   labels: string[];
   pos: string | null;
+  /** Which dictionary answered: "webster1913" or "wordnet". */
+  source: string;
 }
+
+export const CORPUS_LABEL: Record<string, string> = {
+  webster1913: "Webster's 1913",
+  wordnet: "WordNet",
+};
 
 export interface Lookup {
   word: string;
   lemma: string;
   resolution: Resolution;
+  /** Set when a prefix was stripped: showing `ending` for `unending` without
+   *  saying so would tell the reader the opposite of what the word means. */
+  prefix: string | null;
   senses: Sense[];
 }
 
@@ -250,6 +276,281 @@ export const KEEP_ALIVE_CHOICES: { value: string; label: string; hint: string }[
   { value: "-1", label: "Never unload", hint: "For a dedicated server. Models stay in VRAM." },
 ];
 
+// ---- the study layer -----------------------------------------------------
+
+/** What a passage is *doing*. */
+export type Move =
+  | "thesis"
+  | "premise"
+  | "conclusion"
+  | "definition"
+  | "objection"
+  | "reply"
+  | "example"
+  | "concession"
+  | "aporia";
+
+export interface MoveInfo {
+  id: Move;
+  label: string;
+  /** What the move is. */
+  what: string;
+  /** How to recognise it in the text. */
+  tell: string;
+}
+
+/** A block in book order, carrying the page it came from. */
+export interface FlowBlock {
+  id: number;
+  page_id: number;
+  page_no: number | null;
+  ordinal: number;
+  kind: string;
+  text_norm: string;
+  user_edited: boolean;
+  /** First block on its page — the marker goes above it. */
+  starts_page: boolean;
+  /** The page has not been transcribed, so the text stops here. */
+  pending: boolean;
+}
+
+export interface PageGap {
+  page_id: number;
+  page_no: number | null;
+  status: string;
+}
+
+/**
+ * A note, a mark, or both. Body and no move is a note; move and no body is a
+ * mark. The body never renders in the reading column — only a gutter dot.
+ */
+export interface Note {
+  id: number;
+  book_id: number;
+  notebook_id: number | null;
+  block_id: number | null;
+  char_start: number | null;
+  char_end: number | null;
+  anchor_text: string;
+  move: Move | null;
+  body: string;
+  /** Its anchor could not be found after a re-import. Kept, not deleted. */
+  orphaned: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A place to attach a note. */
+export interface NewAnchor {
+  block_id: number;
+  char_start: number;
+  char_end: number;
+  anchor_text: string;
+}
+
+export interface StoredAnchor {
+  id: number;
+  block_id: number | null;
+  char_start: number | null;
+  char_end: number | null;
+  anchor_text: string;
+  orphaned: boolean;
+  page_no: number | null;
+}
+
+export interface Notebook {
+  id: number;
+  book_id: number | null;
+  name: string;
+  kind: string;
+  notes: number;
+}
+
+export type TermStatus = "unclear" | "working" | "settled";
+
+export const TERM_STATUS_LABEL: Record<TermStatus, string> = {
+  unclear: "Still unclear",
+  working: "Working on it",
+  settled: "Settled",
+};
+
+export interface TermRevision {
+  my_gloss: string;
+  status: TermStatus;
+  created_at: string;
+}
+
+export interface Term {
+  id: number;
+  book_id: number;
+  term: string;
+  my_gloss: string;
+  status: TermStatus;
+  first_block_id: number | null;
+  mentions: number;
+  /** Superseded glosses, newest first. Empty until the sense moves. */
+  revisions: TermRevision[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TermMention {
+  block_id: number;
+  char_start: number;
+  char_end: number;
+  term_id: number;
+  term: string;
+  my_gloss: string;
+  status: string;
+}
+
+export interface StoredRef {
+  id: number;
+  book_id: number;
+  block_id: number;
+  char_start: number;
+  char_end: number;
+  surface: string;
+  osis_book: string;
+  chapter: number;
+  verse_start: number | null;
+  verse_end: number | null;
+  confidence: number;
+  corrected: boolean;
+  /** "Romans 3:23". */
+  label: string;
+}
+
+/** Somewhere in the library that cites a passage. */
+export interface Citation {
+  book_id: number;
+  book_title: string;
+  block_id: number;
+  page_no: number | null;
+  surface: string;
+  label: string;
+  context: string;
+}
+
+export interface Annotations {
+  notes: Note[];
+  terms: TermMention[];
+  refs: StoredRef[];
+}
+
+export interface Premise {
+  id: number;
+  ordinal: number;
+  text: string;
+  /** You supplied it, not the author. */
+  implicit: boolean;
+  source_block_id: number | null;
+  char_start: number | null;
+  char_end: number | null;
+}
+
+export interface NewPremise {
+  text: string;
+  implicit: boolean;
+  source_block_id: number | null;
+  char_start: number | null;
+  char_end: number | null;
+}
+
+export interface ArgumentLink {
+  id: number;
+  child_id: number;
+  child_label: string;
+  child_conclusion: string;
+  role: string;
+}
+
+export const VERDICT_LABEL: Record<string, string> = {
+  undecided: "Not yet judged",
+  sound: "Sound",
+  valid_unsound: "Valid, but a premise is false",
+  invalid: "Does not follow",
+};
+
+export const GAP_LABEL: Record<string, string> = {
+  none: "No gap",
+  missing_premise: "Something unstated is needed",
+  equivocation: "A word shifts meaning",
+  irrelevance: "A premise does not bear on it",
+  circularity: "It assumes what it proves",
+};
+
+export interface Argument {
+  id: number;
+  book_id: number;
+  label: string;
+  conclusion: string;
+  verdict: string;
+  gap: string;
+  anchor_block_id: number | null;
+  notes: string;
+  premises: Premise[];
+  links: ArgumentLink[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** A labelled sentence from the Suggest pass. Text comes from the passage. */
+export interface SentenceRole {
+  ordinal: number;
+  role: Move;
+  text: string;
+}
+
+export interface CandidateTerm {
+  surface_form: string;
+  stipulated: boolean;
+}
+
+export interface SupportCheck {
+  reaches_conclusion: boolean;
+  gap: string;
+  steering_question: string;
+}
+
+export interface CharityCheck {
+  /** One-based; 0 when none stands out. */
+  weakest_premise: number;
+  stronger_available: boolean;
+  steering_question: string;
+}
+
+export interface Interlocutor {
+  addressee_quoted: string;
+  position_quoted: string;
+}
+
+export type ExportFormat = "markdown" | "docx" | "odt";
+
+export const EXPORT_FORMATS: { value: ExportFormat; label: string; ext: string }[] = [
+  { value: "docx", label: "Word document", ext: "docx" },
+  { value: "odt", label: "LibreOffice document", ext: "odt" },
+  { value: "markdown", label: "Markdown", ext: "md" },
+];
+
+export type HitKind = "text" | "note" | "term";
+
+export interface SearchHit {
+  kind: HitKind;
+  book_id: number;
+  book_title: string;
+  block_id: number | null;
+  page_no: number | null;
+  /** The match, with the hit wrapped in guillemets for the UI to mark up. */
+  snippet: string;
+  rank: number;
+}
+
+export interface CanonBook {
+  osis: string;
+  name: string;
+}
+
 export const api = {
   checkOllama: () => invoke<OllamaStatus>("check_ollama"),
 
@@ -287,6 +588,10 @@ export const api = {
     invoke<ImportResult>("import_page", { bookId, sourcePath }),
   runOcr: (pageId: number, bookId: number) =>
     invoke<Block[]>("run_ocr", { pageId, bookId }),
+
+  /** Crop a page's photograph to a region and re-read it. */
+  recropPage: (pageId: number, rect: CropRect) =>
+    invoke<Block[]>("recrop_page", { pageId, rect }),
 
   listBlocks: (pageId: number) => invoke<Block[]>("list_blocks", { pageId }),
   editBlock: (blockId: number, text: string) =>
@@ -340,6 +645,154 @@ export const api = {
 
   /** The book's structure, built from its headings. */
   bookOutline: (bookId: number) => invoke<OutlinePage[]>("book_outline", { bookId }),
+
+  // ---- the study layer ---------------------------------------------------
+
+  /** Every move, with what it is and the tell that gives it away. */
+  moveCatalogue: () => invoke<MoveInfo[]>("move_catalogue"),
+
+  /** Every block of a book in reading order, for the scrolling column. */
+  bookBlocks: (bookId: number) => invoke<FlowBlock[]>("book_blocks", { bookId }),
+
+  /** Pages that exist but hold no text yet. */
+  pageGaps: (bookId: number) => invoke<PageGap[]>("page_gaps", { bookId }),
+
+  /** Notes, term occurrences and citations for a window of blocks, in one call. */
+  blockAnnotations: (blockIds: number[]) =>
+    invoke<Annotations>("block_annotations", { blockIds }),
+
+  addNote: (n: {
+    bookId: number;
+    blockId: number | null;
+    charStart: number | null;
+    charEnd: number | null;
+    anchorText: string;
+    move: Move | null;
+    body: string;
+    notebookId?: number | null;
+    /** The rest of a selection that spanned more than one paragraph. */
+    extraAnchors?: NewAnchor[];
+  }) =>
+    invoke<number>("add_note", {
+      bookId: n.bookId,
+      blockId: n.blockId,
+      charStart: n.charStart,
+      charEnd: n.charEnd,
+      anchorText: n.anchorText,
+      move: n.move,
+      body: n.body,
+      notebookId: n.notebookId ?? null,
+      extraAnchors: n.extraAnchors ?? [],
+    }),
+
+  /** Attach the current selection to a note that already exists. */
+  attachAnchors: (noteId: number, anchors: NewAnchor[]) =>
+    invoke<number>("attach_anchors", { noteId, anchors }),
+  noteAnchors: (noteId: number) =>
+    invoke<StoredAnchor[]>("note_anchors", { noteId }),
+  deleteNoteAnchor: (anchorId: number) =>
+    invoke<void>("delete_note_anchor", { anchorId }),
+
+  updateNote: (noteId: number, body: string, move: Move | null) =>
+    invoke<void>("update_note", { noteId, body, move }),
+  deleteNote: (noteId: number) => invoke<void>("delete_note", { noteId }),
+  listNotes: (bookId: number, notebookId?: number | null) =>
+    invoke<Note[]>("list_notes", { bookId, notebookId: notebookId ?? null }),
+  listNotebooks: (bookId: number) => invoke<Notebook[]>("list_notebooks", { bookId }),
+  createNotebook: (bookId: number | null, name: string) =>
+    invoke<number>("create_notebook", { bookId, name }),
+
+  listTerms: (bookId: number) => invoke<Term[]>("list_terms", { bookId }),
+  saveTerm: (
+    bookId: number,
+    term: string,
+    gloss: string,
+    status: TermStatus,
+    firstBlockId: number | null,
+  ) => invoke<number>("save_term", { bookId, term, gloss, status, firstBlockId }),
+  deleteTerm: (termId: number) => invoke<void>("delete_term", { termId }),
+
+  /** Words the author may be using specially. Never a definition. */
+  suggestTerms: (passage: string) =>
+    invoke<CandidateTerm[]>("suggest_terms", { passage }),
+
+  /** Label the moves in a passage. Returns ordinals; text comes from the passage. */
+  suggestMoves: (passage: string) =>
+    invoke<SentenceRole[]>("suggest_moves", { passage }),
+
+  /** Who the passage is answering, in its own words. */
+  findInterlocutor: (passage: string) =>
+    invoke<Interlocutor>("find_interlocutor", { passage }),
+
+  listArguments: (bookId: number) => invoke<Argument[]>("list_arguments", { bookId }),
+  createArgument: (bookId: number, label: string, anchorBlockId: number | null) =>
+    invoke<number>("create_argument", { bookId, label, anchorBlockId }),
+  saveArgument: (a: {
+    argumentId: number;
+    label: string;
+    conclusion: string;
+    verdict: string;
+    gap: string;
+    notes: string;
+    premises: NewPremise[];
+  }) => invoke<void>("save_argument", a),
+  deleteArgument: (argumentId: number) => invoke<void>("delete_argument", { argumentId }),
+  linkArguments: (parentId: number, childId: number, role: string) =>
+    invoke<void>("link_arguments", { parentId, childId, role }),
+  unlinkArguments: (linkId: number) => invoke<void>("unlink_arguments", { linkId }),
+
+  /** Do the premises reach the conclusion? Names the gap; never fills it. */
+  checkSupport: (conclusion: string, premises: string[]) =>
+    invoke<SupportCheck>("check_support", { conclusion, premises }),
+  /** Which premise is weakest, and whether a better one exists. */
+  checkCharity: (conclusion: string, premises: string[]) =>
+    invoke<CharityCheck>("check_charity", { conclusion, premises }),
+
+  setThesis: (bookId: number, statement: string) =>
+    invoke<void>("set_thesis", { bookId, statement }),
+  getThesis: (bookId: number) => invoke<string | null>("get_thesis", { bookId }),
+
+  /** Find every scripture citation in a book. Needs no Bible. */
+  scanReferences: (bookId: number) => invoke<number>("scan_references", { bookId }),
+
+  /** Everything in the library that cites a passage — including your own books. */
+  citationsOf: (osisBook: string, chapter: number, verse: number | null) =>
+    invoke<Citation[]>("citations_of", { osisBook, chapter, verse }),
+
+  /** Where a passage lives in one book — what linked panes follow. */
+  locateReference: (
+    bookId: number,
+    osisBook: string,
+    chapter: number,
+    verse: number | null,
+  ) => invoke<number | null>("locate_reference", { bookId, osisBook, chapter, verse }),
+
+  /** The verse itself, when a Bible has been imported. */
+  verseText: (osisBook: string, chapter: number, verse: number) =>
+    invoke<string | null>("verse_text", { osisBook, chapter, verse }),
+
+  correctReference: (
+    refId: number,
+    osisBook: string,
+    chapter: number,
+    verseStart: number | null,
+    verseEnd: number | null,
+  ) => invoke<void>("correct_reference", { refId, osisBook, chapter, verseStart, verseEnd }),
+  deleteReference: (refId: number) => invoke<void>("delete_reference", { refId }),
+
+  canon: () => invoke<CanonBook[]>("canon"),
+
+  /** Write everything you have written about a book to a file. */
+  exportBook: (bookId: number, format: ExportFormat, dest: string) =>
+    invoke<string>("export_book", { bookId, format, dest }),
+
+  /** Search the text, the notes, and the terms together. */
+  searchLibrary: (query: string, bookId: number | null) =>
+    invoke<SearchHit[]>("search_library", { query, bookId }),
+
+  /** Every place in the library a word occurs. */
+  concordance: (word: string, limit: number) =>
+    invoke<SearchHit[]>("concordance", { word, limit }),
 
   /** Import an EPUB, PDF, or web page — text sources, so no OCR. */
   importDocument: (bookId: number, source: string) =>

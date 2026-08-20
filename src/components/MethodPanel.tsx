@@ -111,7 +111,9 @@ export function MethodPanel({
           <li>5. Check it answers who or what.</li>
           <li>6. Move on, and let the sentences build up.</li>
         </ol>
-        <p className="mt-6">Choose a paragraph on the left to begin.</p>
+        <p className="mt-6">
+          Click a paragraph in the book to begin — either pane will do.
+        </p>
       </div>
     );
   }
@@ -146,33 +148,41 @@ export function MethodPanel({
 
   return (
     <div className="px-6 py-5">
-      <div className="flex items-baseline justify-between">
+      <div className="flex items-baseline justify-between gap-2">
         <h2 className="text-base font-semibold">Understand this paragraph</h2>
         {position && (
-          <span className="text-xs text-ink-soft">
-            paragraph {position.index + 1} of {position.total}
+          <span className="shrink-0 text-xs text-ink-soft tabular-nums">
+            {position.index + 1} of {position.total}
           </span>
         )}
       </div>
 
-      {/* This paragraph does not fit on one page. Say so, and show the whole
-          of it, rather than asking for a summary of half a thought. */}
+      {/* Which paragraph, in its own words. The panel may sit in the far pane
+          with the book collapsed, and a step wizard with no sight of its
+          subject is a form, not a reading tool. */}
+      <p className="prose-page mt-2 line-clamp-3 border-l-2 border-rule pl-3 text-[0.9rem] text-ink-soft">
+        {block.text_norm}
+      </p>
+
+      {/* A paragraph running across a page boundary used to be repeated here
+          in full, with a warning to summarise all of it — necessary when the
+          column showed one page at a time. The continuous column now draws it
+          whole, so the copy was a second rendering of text already on screen.
+          Only the fact is worth keeping. */}
       {context?.spans_pages && (
-        <div className="mt-3 rounded border border-accent/30 bg-paper-dim p-3">
-          <p className="text-xs font-medium uppercase tracking-wide text-ink-soft">
-            {context.continued_from_page
-              ? "Continued from the previous page"
-              : "Continues on the next page"}
-          </p>
-          <p className="prose-page mt-2 text-[0.95rem]">{context.text}</p>
-          <p className="mt-2 text-xs text-ink-soft">
-            Summarise the whole paragraph, not just the part on this page.
-          </p>
-        </div>
+        <p className="mt-3 text-xs text-ink-soft">
+          This paragraph runs across a page boundary
+          {context.continued_from_page
+            ? ` from page ${context.continued_from_page}`
+            : context.continues_on_page
+              ? ` onto page ${context.continues_on_page}`
+              : ""}
+          . The column shows it whole.
+        </p>
       )}
 
       {context?.incomplete && (
-        <div className="mt-3 rounded border border-amber-500/40 bg-paper-dim p-3">
+        <div className="mt-3 rounded border border-warn/40 bg-paper-dim p-3">
           <p className="text-sm">This paragraph runs onto the next page.</p>
           <p className="mt-1 text-xs text-ink-soft">
             Photograph the following page and it will be joined up
@@ -240,7 +250,7 @@ export function MethodPanel({
             className="mt-2 w-full resize-none rounded border border-rule bg-transparent px-3 py-2 text-sm outline-none focus:border-accent"
           />
           <div className="mt-1 flex items-center justify-between text-xs">
-            <span className={tooManySentences ? "text-amber-600" : "text-ink-soft"}>
+            <span className={tooManySentences ? "text-warn" : "text-ink-soft"}>
               {tooManySentences
                 ? "That looks like more than one sentence — compress it further."
                 : `${words} word${words === 1 ? "" : "s"}`}
@@ -308,7 +318,7 @@ export function MethodPanel({
         </StepRow>
       )}
 
-      {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
+      {error && <p className="mt-4 text-sm text-danger">{error}</p>}
 
       {feedback && (
         <div className="mt-5 rounded border border-rule bg-paper-dim p-4">
@@ -435,9 +445,9 @@ function StepRow({
 function VerdictDot({ verdict }: { verdict: Feedback["verdict"] }) {
   const color =
     verdict === "on_target"
-      ? "bg-emerald-600"
+      ? "bg-ok"
       : verdict === "partial"
-        ? "bg-amber-500"
-        : "bg-red-500";
+        ? "bg-warn"
+        : "bg-danger";
   return <span className={`inline-block h-2 w-2 rounded-full ${color}`} />;
 }

@@ -1,17 +1,57 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 // Tauri's dialog, not window.confirm — WebView2 does not reliably implement it.
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { api, ERA_LABELS, type Book, type Era } from "../lib/api";
+import { api, ERA_LABELS, type Book, type BookStats, type Era } from "../lib/api";
 
 export function Library({ onOpen }: { onOpen: (b: Book) => void }) {
   const [books, setBooks] = useState<Book[]>([]);
   const [adding, setAdding] = useState(false);
+  const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /**
+   * How much work each book holds.
+   *
+   * These counts existed only inside the delete confirmation, which meant the
+   * one moment the application told you how much thinking a book contained was
+   * the moment before it destroyed it. A library is a record of work, not a
+   * list of titles.
+   */
+  const [stats, setStats] = useState<Record<number, BookStats>>({});
 
   const refresh = () => api.listBooks().then(setBooks).catch((e) => setError(String(e)));
   useEffect(() => {
     refresh();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(
+      books.map((b) =>
+        api
+          .bookStats(b.id)
+          .then((s) => [b.id, s] as const)
+          .catch(() => null),
+      ),
+    ).then((rows) => {
+      if (cancelled) return;
+      const next: Record<number, BookStats> = {};
+      for (const row of rows) if (row) next[row[0]] = row[1];
+      setStats(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [books]);
+
+  const shown = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return books;
+    return books.filter(
+      (b) =>
+        b.title.toLowerCase().includes(needle) ||
+        (b.author ?? "").toLowerCase().includes(needle),
+    );
+  }, [books, query]);
 
   /**
    * Delete a book, having said plainly what that costs.
@@ -24,19 +64,29 @@ export function Library({ onOpen }: { onOpen: (b: Book) => void }) {
     let detail = "";
     try {
       const s = await api.bookStats(book.id);
+      // The pages can be photographed again; the thinking cannot. So the
+      // prompt counts the thinking too — every one of these cascade-deletes
+      // with the book, and naming only pages and summaries understated by
+      // five tables what was about to be destroyed.
       const parts = [
         `${s.pages} page${s.pages === 1 ? "" : "s"}`,
         `${s.paragraphs} paragraph${s.paragraphs === 1 ? "" : "s"}`,
       ];
-      if (s.summaries > 0) {
-        parts.push(
-          `${s.summaries} summar${s.summaries === 1 ? "y" : "ies"} you wrote`,
-        );
+      const yours: string[] = [];
+      const add = (n: number, one: string, many: string) => {
+        if (n > 0) yours.push(`${n} ${n === 1 ? one : many}`);
+      };
+      add(s.summaries, "summary", "summaries");
+      add(s.notes, "note or mark", "notes and marks");
+      add(s.terms, "term", "terms");
+      add(s.arguments, "argument", "arguments");
+      add(s.words_looked_up, "saved word", "saved words");
+
+      detail = `\n\nThis removes ${parts.join(" and ")}.`;
+      if (yours.length > 0) {
+        detail += `\n\nAnd your own work: ${yours.join(", ")}. The pages can be photographed again — this cannot.`;
       }
-      if (s.words_looked_up > 0) {
-        parts.push(`${s.words_looked_up} saved word${s.words_looked_up === 1 ? "" : "s"}`);
-      }
-      detail = `\n\nThis removes ${parts.join(", ")}. It cannot be undone.`;
+      detail += `\n\nIt cannot be undone.`;
     } catch {
       // Worth confirming even if the tally cannot be fetched.
     }
@@ -67,7 +117,7 @@ export function Library({ onOpen }: { onOpen: (b: Book) => void }) {
         </button>
       </div>
 
-      {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
+      {error && <p className="mt-4 text-sm text-danger">{error}</p>}
 
       {adding && (
         <NewBookForm
@@ -85,8 +135,17 @@ export function Library({ onOpen }: { onOpen: (b: Book) => void }) {
         </p>
       )}
 
+      {books.length > 6 && (
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter by title or author"
+          className="mt-6 w-full rounded border border-rule bg-transparent px-3 py-1.5 text-sm outline-none focus:border-accent"
+        />
+      )}
+
       <ul className="mt-6 divide-y divide-rule">
-        {books.map((b) => (
+        {shown.map((b) => (
           <li key={b.id} className="group flex items-center gap-2">
             <button
               onClick={() => onOpen(b)}
@@ -97,12 +156,13 @@ export function Library({ onOpen }: { onOpen: (b: Book) => void }) {
                 {b.author ? `${b.author} · ` : ""}
                 {ERA_LABELS[b.era as Era] ?? b.era}
               </div>
+              <Progress stats={stats[b.id]} />
             </button>
             <button
               onClick={() => remove(b)}
               title={`Delete ${b.title}`}
               aria-label={`Delete ${b.title}`}
-              className="shrink-0 rounded p-2 text-ink-soft opacity-0 transition-opacity hover:bg-paper-dim hover:text-red-600 focus:opacity-100 group-hover:opacity-100"
+              className="shrink-0 rounded p-2 text-ink-soft opacity-0 transition-opacity hover:bg-paper-dim hover:text-danger focus:opacity-100 group-hover:opacity-100"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" />
@@ -111,6 +171,38 @@ export function Library({ onOpen }: { onOpen: (b: Book) => void }) {
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/**
+ * How far through a book you are, and what you have made of it.
+ *
+ * Deliberately a sentence rather than a bar: "31 of 204 paragraphs" is a fact
+ * you can act on, where a 15%-full bar mostly says you are behind.
+ */
+function Progress({ stats }: { stats?: BookStats }) {
+  if (!stats) return null;
+  if (stats.paragraphs === 0) {
+    return (
+      <div className="mt-1 text-xs text-ink-soft">
+        No pages yet — open it and add some.
+      </div>
+    );
+  }
+
+  const made: string[] = [];
+  if (stats.terms > 0) made.push(`${stats.terms} terms`);
+  if (stats.arguments > 0) made.push(`${stats.arguments} arguments`);
+  if (stats.notes > 0) made.push(`${stats.notes} notes`);
+  if (stats.words_looked_up > 0) made.push(`${stats.words_looked_up} words`);
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-ink-soft">
+      <span className="tabular-nums">
+        {stats.summaries} of {stats.paragraphs} paragraphs summarised
+      </span>
+      {made.length > 0 && <span>· {made.join(", ")}</span>}
     </div>
   );
 }

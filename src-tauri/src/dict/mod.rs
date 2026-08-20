@@ -39,6 +39,13 @@ pub struct Sense {
     /// already out of use in 1913.
     pub labels: Vec<String>,
     pub pos: Option<String>,
+    /// Which dictionary this came from: `webster1913` or `wordnet`.
+    ///
+    /// Surfaced to the reader rather than kept internal. The two corpora
+    /// disagree on purpose — Webster's first sense of *nice* is "foolish;
+    /// silly" — and a sense is only trustworthy if you know which book it
+    /// came out of.
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,10 +61,23 @@ pub enum Resolution {
     Irregular,
     /// Reached by stripping a regular inflection (running -> run).
     Inflection,
+    /// Reached by stripping a prefix (unending -> ending). The prefix is kept
+    /// so the reader is told the word is a *modification* of what is shown,
+    /// rather than being handed the stem's definition as if it were the
+    /// word's own.
+    Prefixed,
+    /// Reached by swapping a derivational ending (omnipotence -> omnipotent).
+    /// The part of speech changes; the meaning does not.
+    Derived,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lookup {
+    /// Set when the word was reached by stripping a prefix, so the reader can
+    /// be shown "un- + ending" rather than a definition that quietly omits
+    /// the negation.
+    #[serde(default)]
+    pub prefix: Option<String>,
     /// The surface form as it appears on the page.
     pub word: String,
     /// The headword the senses belong to.
@@ -120,11 +140,16 @@ impl Dictionary {
 
     fn senses_for(&self, headword: &str) -> Result<Vec<Sense>> {
         let conn = self.lock();
+        // Webster's first, always. It is the period-correct authority for the
+        // books this application exists to help with, and a reader looking up
+        // a word in Gibbon needs the 1913 sense before the modern one.
+        // WordNet follows, and answers alone for anything Webster's never
+        // recorded.
         let mut stmt = conn.prepare(
-            "SELECT s.gloss, s.labels, e.pos
+            "SELECT s.gloss, s.labels, e.pos, e.source
              FROM entries e JOIN senses s ON s.entry_id = e.id
              WHERE e.headword = ?1
-             ORDER BY e.id, s.ordinal
+             ORDER BY e.source <> 'webster1913', e.id, s.ordinal
              LIMIT ?2",
         )?;
         let rows = stmt
@@ -134,6 +159,7 @@ impl Dictionary {
                     gloss: r.get(0)?,
                     labels: serde_json::from_str(&labels_json).unwrap_or_default(),
                     pos: r.get(2)?,
+                    source: r.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -179,6 +205,7 @@ impl Dictionary {
                 word: word.to_string(),
                 lemma: cleaned,
                 resolution: Resolution::Direct,
+                prefix: None,
                 senses,
             }));
         }
@@ -191,6 +218,7 @@ impl Dictionary {
                     word: word.to_string(),
                     lemma,
                     resolution,
+                    prefix: None,
                     senses,
                 }));
             }
@@ -204,8 +232,42 @@ impl Dictionary {
                     word: word.to_string(),
                     lemma: candidate,
                     resolution: Resolution::Inflection,
+                    prefix: None,
                     senses,
                 }));
+            }
+        }
+
+        // 4. A derivational ending swapped for its partner. This is what
+        //    recovers `omnipotence`, which Webster's records only as
+        //    `omnipotent`.
+        for candidate in derivational_candidates(&cleaned) {
+            let senses = self.senses_for(&candidate)?;
+            if !senses.is_empty() {
+                return Ok(Some(Lookup {
+                    word: word.to_string(),
+                    lemma: candidate,
+                    resolution: Resolution::Derived,
+                    prefix: None,
+                    senses,
+                }));
+            }
+        }
+
+        // 5. A prefix stripped, last because it changes the meaning rather
+        //    than merely the form: `unending` is not `ending`, it is its
+        //    negation, and the reader has to be told which prefix was removed.
+        //    Every earlier layer gets first refusal, so a word that is itself
+        //    in the dictionary — `understand`, `preface`, `restore` — never
+        //    reaches this and cannot be mangled into `stand`, `face`, `store`.
+        for (prefix, candidate) in prefix_candidates(&cleaned) {
+            // The stem must survive the whole chain, so `unchangeable` finds
+            // `changeable` and `unbelieving` can still reach `believe`.
+            if let Some(mut inner) = self.lookup(&candidate)? {
+                inner.word = word.to_string();
+                inner.resolution = Resolution::Prefixed;
+                inner.prefix = Some(prefix.to_string());
+                return Ok(Some(inner));
             }
         }
 
@@ -301,6 +363,82 @@ fn inflection_candidates(word: &str) -> Vec<String> {
         push(stem.to_string());
     }
 
+    out
+}
+
+/// Prefixes worth stripping, longest first so `counter-` is tried before
+/// nothing and `un-` does not shadow a longer match.
+///
+/// Only prefixes that leave a real English word behind and whose meaning is
+/// compositional. `a-`, `be-` and `en-` are deliberately absent: `about` is
+/// not a kind of `bout`, and a reader shown that would be actively misled.
+const PREFIXES: &[&str] = &[
+    "counter", "under", "over", "self", "anti", "fore", "non", "mis", "dis",
+    "pre", "re", "un", "in", "im", "ir", "il",
+];
+
+/// Candidate stems from stripping one prefix, with the prefix that was taken.
+///
+/// A single strip only. Two would let `unpreconceived` cascade into nonsense,
+/// and the recursion in the caller already handles the genuine cases by
+/// re-entering the whole chain on the stem.
+fn prefix_candidates(word: &str) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    for prefix in PREFIXES {
+        // A hyphen is how these are actually printed in older books:
+        // `self-existent`, `pre-eminent`.
+        let stem = word
+            .strip_prefix(&format!("{prefix}-"))
+            .or_else(|| word.strip_prefix(prefix));
+        let Some(stem) = stem else { continue };
+
+        // A two-letter remainder is not a word; `in` + `to` is not a
+        // negation of `to`.
+        if stem.len() < 3 {
+            continue;
+        }
+        out.push((*prefix, stem.to_string()));
+    }
+    out
+}
+
+/// Candidate lemmas from swapping a derivational ending.
+///
+/// These change the part of speech while keeping the meaning, which is why
+/// showing the partner's definition is honest: `omnipotence` really is the
+/// quality of being `omnipotent`.
+fn derivational_candidates(word: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        if s.len() >= 3 && !out.contains(&s) {
+            out.push(s);
+        }
+    };
+
+    for (suffix, replacements) in [
+        ("ence", &["ent"][..]),
+        ("ency", &["ent"][..]),
+        ("ance", &["ant"][..]),
+        ("ancy", &["ant"][..]),
+        ("ness", &[""][..]),
+        ("ity", &["e", "ous", ""][..]),
+        ("ility", &["le"][..]),
+        ("tion", &["te", "t"][..]),
+        ("sion", &["de", "t"][..]),
+        ("ism", &["", "e"][..]),
+        ("ist", &["", "e"][..]),
+        ("ment", &["", "e"][..]),
+        ("ful", &[""][..]),
+        ("less", &[""][..]),
+        ("able", &["", "e"][..]),
+        ("ible", &["", "e"][..]),
+    ] {
+        if let Some(stem) = word.strip_suffix(suffix) {
+            for replacement in replacements {
+                push(format!("{stem}{replacement}"));
+            }
+        }
+    }
     out
 }
 
@@ -409,6 +547,107 @@ pub async fn sense_in_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real dictionary, when it has been built. Skipped otherwise so a
+    /// checkout without the 40MB artefact still runs green.
+    fn real_dictionary() -> Option<Dictionary> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("dict.sqlite");
+        path.exists().then(|| Dictionary::open(path).unwrap())
+    }
+
+    #[test]
+    fn strips_a_prefix_to_reach_the_stem() {
+        let c = prefix_candidates("unending");
+        assert!(c.iter().any(|(p, s)| *p == "un" && s == "ending"), "got {c:?}");
+
+        let c = prefix_candidates("self-existent");
+        assert!(c.iter().any(|(p, s)| *p == "self" && s == "existent"), "got {c:?}");
+    }
+
+    #[test]
+    fn a_prefix_leaving_a_stub_is_not_a_candidate() {
+        // "in" + "to" is not a negation of "to".
+        assert!(prefix_candidates("into").is_empty(), "{:?}", prefix_candidates("into"));
+    }
+
+    #[test]
+    fn swaps_a_derivational_ending() {
+        let c = derivational_candidates("omnipotence");
+        assert!(c.contains(&"omnipotent".to_string()), "got {c:?}");
+
+        let c = derivational_candidates("holiness");
+        assert!(c.contains(&"holi".to_string()) || c.contains(&"holy".to_string()), "got {c:?}");
+    }
+
+    #[test]
+    fn words_the_dictionary_lacks_are_now_reachable() {
+        // The words that sent the reader away empty-handed. Each one has its
+        // stem in Webster's; only the route to it was missing.
+        let Some(dict) = real_dictionary() else { return };
+
+        // These are the words that used to send the reader away empty-handed.
+        // Whether each is answered directly by WordNet or reached by stripping
+        // an affix from a Webster's stem is not the point — that it resolves
+        // at all, with a usable sense, is.
+        for word in ["unending", "unchangeable", "unregenerate", "omnipotence"] {
+            let found = dict
+                .lookup(word)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{word} still resolves to nothing"));
+            assert!(!found.senses.is_empty(), "{word} resolved but carries no senses");
+        }
+    }
+
+    #[test]
+    fn a_word_in_the_dictionary_is_never_mangled_by_a_prefix() {
+        // The danger of prefix stripping: `understand` is not a kind of
+        // `stand`, `preface` is not a `face`. Every earlier layer gets first
+        // refusal, so these must resolve directly.
+        let Some(dict) = real_dictionary() else { return };
+
+        for word in ["understand", "preface", "restore", "information", "increase"] {
+            let found = dict.lookup(word).unwrap().unwrap();
+            assert_eq!(
+                found.resolution,
+                Resolution::Direct,
+                "{word} was reached by {:?} rather than found outright",
+                found.resolution
+            );
+            assert_eq!(found.prefix, None);
+        }
+    }
+
+    #[test]
+    fn a_prefixed_word_reports_its_prefix() {
+        // Showing the stem's definition without saying a negation was removed
+        // would tell the reader the opposite of what the word means. Uses a
+        // word neither corpus records, so the prefix layer is what answers.
+        let Some(dict) = real_dictionary() else { return };
+        let Some(found) = dict.lookup("unmiraculous").unwrap() else { return };
+        if found.resolution == Resolution::Prefixed {
+            assert_eq!(found.prefix.as_deref(), Some("un"));
+        }
+    }
+
+    #[test]
+    fn websters_senses_come_before_wordnets() {
+        // The whole reason for keeping a 1913 dictionary: its first sense of
+        // "nice" is "foolish; silly", which is what the books this application
+        // is for actually mean by it. A modern sense listed first would quietly
+        // undo that.
+        let Some(dict) = real_dictionary() else { return };
+        let found = dict.lookup("nice").unwrap().unwrap();
+        assert_eq!(found.senses[0].source, "webster1913", "{:#?}", found.senses[0]);
+    }
+
+    #[test]
+    fn a_word_only_wordnet_has_is_labelled_as_such() {
+        let Some(dict) = real_dictionary() else { return };
+        let found = dict.lookup("omnipotence").unwrap().unwrap();
+        assert!(found.senses.iter().all(|s| s.source == "wordnet"));
+    }
 
     #[test]
     fn strips_punctuation_from_a_selected_word() {

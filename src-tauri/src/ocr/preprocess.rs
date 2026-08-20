@@ -327,6 +327,86 @@ pub fn split_at_gutter(img: &DynamicImage, gutter_x: u32) -> (DynamicImage, Dyna
     )
 }
 
+/// A crop rectangle in fractions of the image, as the reader drew it.
+///
+/// Normalised rather than in pixels because the viewer scales the photograph
+/// to fit the window: pixel coordinates from a 900px-wide preview mean nothing
+/// against a 4000px original, and the reader can resize the window between
+/// drawing the box and pressing the button.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct CropRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl CropRect {
+    /// Clamp to the image and refuse a rectangle too small to hold text.
+    ///
+    /// A stray click produces a one-pixel box; cropping to it would destroy
+    /// the page and leave the reader with nothing to re-read.
+    pub fn to_pixels(self, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+        let x = (self.x.clamp(0.0, 1.0) * width as f32).round() as u32;
+        let y = (self.y.clamp(0.0, 1.0) * height as f32).round() as u32;
+        let w = (self.width.clamp(0.0, 1.0) * width as f32).round() as u32;
+        let h = (self.height.clamp(0.0, 1.0) * height as f32).round() as u32;
+
+        let w = w.min(width.saturating_sub(x));
+        let h = h.min(height.saturating_sub(y));
+
+        // Below a twentieth of each edge there is nothing a model could read.
+        if w < width / 20 || h < height / 20 || w == 0 || h == 0 {
+            return None;
+        }
+        Some((x, y, w, h))
+    }
+}
+
+/// Crop a photograph to the region the reader drew, and produce both copies
+/// again.
+///
+/// This is the answer to a photograph that caught the facing page, or the desk,
+/// or the reader's own thumb: the OCR model transcribes whatever it is shown,
+/// and the only reliable fix is to stop showing it the part that is not the
+/// page.
+pub fn crop_import(bytes: &[u8], rect: CropRect, opts: &PreprocessOptions) -> Result<ImportedImage> {
+    let image = decode_any(bytes)?;
+    let (w, h) = (image.width(), image.height());
+    let Some((x, y, cw, ch)) = rect.to_pixels(w, h) else {
+        return Err(crate::error::AppError::Invalid(
+            "that crop is too small to read — drag a box around the page".into(),
+        ));
+    };
+
+    let cropped = image.crop_imm(x, y, cw, ch);
+    // Re-encoded rather than re-run through `prepare_import`: the orientation
+    // was already corrected on the first import, and turning it again would
+    // rotate a page the reader has just squared up by hand.
+    Ok(ImportedImage {
+        archival: encode_jpeg(&cropped, ARCHIVAL_QUALITY)?,
+        archival_ext: "jpg",
+        processed: encode_jpeg(&bound(&cropped, opts), opts.jpeg_quality)?,
+        converted_from: None,
+        side: None,
+    })
+}
+
+/// Shrink to the model's working resolution, if it is over.
+fn bound(img: &DynamicImage, opts: &PreprocessOptions) -> DynamicImage {
+    let fit = fit_within(img.width(), img.height(), opts.max_edge);
+    let resized = if fit.width == img.width() && fit.height == img.height() {
+        img.clone()
+    } else {
+        img.resize(fit.width, fit.height, image::imageops::FilterType::Lanczos3)
+    };
+    if opts.grayscale {
+        DynamicImage::ImageLuma8(resized.to_luma8())
+    } else {
+        resized
+    }
+}
+
 /// The two copies produced by an import.
 pub struct ImportedImage {
     /// Full resolution and viewable in the app. For a HEIC or TIFF source this
@@ -509,6 +589,45 @@ pub fn turn_page_over(path: &str) -> Result<Vec<u8>> {
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
     encoder.encode_image(&flipped)?;
     Ok(out.into_inner())
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+
+    #[test]
+    fn a_normalised_rect_becomes_pixels() {
+        let r = CropRect { x: 0.25, y: 0.5, width: 0.5, height: 0.25 };
+        assert_eq!(r.to_pixels(400, 400), Some((100, 200, 200, 100)));
+    }
+
+    #[test]
+    fn a_stray_click_is_refused_rather_than_destroying_the_page() {
+        let tiny = CropRect { x: 0.5, y: 0.5, width: 0.001, height: 0.001 };
+        assert_eq!(tiny.to_pixels(1000, 1000), None);
+    }
+
+    #[test]
+    fn a_rect_running_off_the_edge_is_clamped_not_rejected() {
+        // Dragging past the corner is how people draw boxes.
+        let r = CropRect { x: 0.5, y: 0.5, width: 2.0, height: 2.0 };
+        assert_eq!(r.to_pixels(100, 100), Some((50, 50, 50, 50)));
+    }
+
+    #[test]
+    fn cropping_keeps_the_requested_region() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::new(800, 600));
+        let bytes = encode_jpeg(&img, 90).unwrap();
+        let out = crop_import(
+            &bytes,
+            CropRect { x: 0.0, y: 0.0, width: 0.5, height: 1.0 },
+            &PreprocessOptions::default(),
+        )
+        .unwrap();
+        let back = decode_any(&out.archival).unwrap();
+        assert_eq!(back.width(), 400);
+        assert_eq!(back.height(), 600);
+    }
 }
 
 #[cfg(test)]
